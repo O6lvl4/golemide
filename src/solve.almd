@@ -405,9 +405,25 @@ fn rung_for(unusable: Int) -> Rung = list.get(LADDER, int.min(unusable, list.len
 
 // An attempt that ran this long was the model thinking, not the tests; the
 // next one gets half the output budget and one rung less reasoning.
+//
+// `escalated` is the fix to a collision between this guard and the ladder above.
+// They read different signals — the guard reads wall-clock, the ladder reads
+// "the last answer was unusable" — and when both fire the guard was applied last
+// and won, so an escalation the ladder had just earned was cancelled. Measured on
+// the six hardest exercises of the Almide benchmark: the guard fired 4 times and the
+// ladder had fired in 4 of those 4, every time wanting `medium` and getting `low`.
+//
+// A slow attempt that produced nothing usable is evidence of difficulty, not of
+// waste, so the ladder wins on effort. The halved output budget stays either way:
+// that is a spend cap, and it does not contradict thinking harder.
+//
+// (All 4 collisions were on the two exercises that fail in every arm, so this is not
+// evidence the guard caused those failures — hard exercises are both slow and
+// failing. The defect is that the override happens at all.)
 let SLOW_ATTEMPT_MS = 300000
-fn budget_after(last_ms: Int, rung: Rung) -> (Int, String) =
-  if last_ms > SLOW_ATTEMPT_MS then (8192, ask.lower_effort(rung.effort)) else (16384, rung.effort)
+fn budget_after(last_ms: Int, rung: Rung, escalated: Bool) -> (Int, String) =
+  if last_ms > SLOW_ATTEMPT_MS then (8192, if escalated then rung.effort else ask.lower_effort(rung.effort))
+  else (16384, rung.effort)
 
 // A unified diff of one whole-file rewrite, for the history.
 //
@@ -644,9 +660,13 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
       var apply_error = ""
       var diffs: List[String] = []
       let rung = rung_for(unusable + stuck)
-      let (max_tokens, effort) = budget_after(last_attempt_ms, rung)
+      let escalated = unusable + stuck > 0
+      let (max_tokens, effort) = budget_after(last_attempt_ms, rung, escalated)
       if last_attempt_ms > SLOW_ATTEMPT_MS then note(quiet, "last attempt took " + int.to_string(last_attempt_ms / 1000) + "s; this one gets " + effort + " reasoning and " + int.to_string(max_tokens) + " output tokens")! else ()
-      if unusable > 0 then note(quiet, "last attempt produced nothing usable; reasoning=" + rung.effort + (if rung.strong then ", model=" + ask.MODEL_STRONG else ""))! else ()
+      // `effort`, not `rung.effort`: this note used to print what the ladder asked for
+      // while the guard was quietly using something lower, so the two notes contradicted
+      // each other in the log and neither named what was actually sent.
+      if unusable > 0 then note(quiet, "last attempt produced nothing usable; reasoning=" + effort + (if rung.strong then ", model=" + ask.MODEL_STRONG else ""))! else ()
       let model = if rung.strong then ask.MODEL_STRONG else opts.model
 
       // Two rounds, not two attempts: an answer refused for its shape is a
@@ -779,7 +799,30 @@ test "sources are unwrapped and decoded; failures are keyed without numbers" {
   assert_eq(unwrap_source("```rust\nfn main() {}\n```"), "fn main() {}\n")
   assert_eq(decode_source("line one\\nline two\\n"), "line one\nline two\n")
   assert_eq(failure_key("took 0.012s at 0x7fff"), "took #s at #")
-  assert_eq(budget_after(400000, Rung { effort: "high", strong: false }), (8192, "medium"))
+  assert_eq(budget_after(400000, Rung { effort: "high", strong: false }, false), (8192, "medium"))
+}
+
+test "the latency guard caps output but does not cancel an earned escalation" {
+  let high = Rung { effort: "high", strong: false }
+  let low = Rung { effort: "low", strong: false }
+
+  // Slow, and the ladder has not escalated: the guard lowers a rung, as designed.
+  assert_eq(budget_after(400000, high, false), (8192, "medium"))
+  // Slow, but the last answer was unusable: the ladder's effort stands. The spend cap
+  // still applies — that is the part of the guard that does not contradict the ladder.
+  assert_eq(budget_after(400000, high, true), (8192, "high"))
+
+  // Fast: the guard is not involved either way.
+  assert_eq(budget_after(1000, high, false), (16384, "high"))
+  assert_eq(budget_after(1000, high, true), (16384, "high"))
+
+  // The floor holds: nothing goes below the bottom rung.
+  assert_eq(budget_after(400000, low, false), (8192, "low"))
+
+  // The collision this fixes, at the values it was measured at: the ladder asked for
+  // medium after one unusable answer, and the guard was turning it back into low.
+  assert_eq(rung_for(1).effort, "medium")
+  assert_eq(budget_after(341000, rung_for(1), true), (8192, "medium"))
 }
 
 test "expanded reads retain the tail and partial files are not editable" {
