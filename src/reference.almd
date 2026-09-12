@@ -13,9 +13,13 @@ import env
 import fs
 import self.observe
 
-type Reference = { label: String, text: String }
+// `path` is set only by the in-project tier, and only because the same file is then
+// a candidate for reading as source. Everything else leaves it empty: a configured
+// reference lives outside the project and a toolchain one is a command, so neither
+// can collide with the file list.
+type Reference = { label: String, text: String, path: String }
 
-let NONE = Reference { label: "", text: "" }
+let NONE = Reference { label: "", text: "", path: "" }
 
 // How much of a reference is worth sending. Almide's quick reference is ~41 KB
 // and its stdlib snapshot ~14 KB, so both arrive whole; its llms.txt is 213 KB,
@@ -45,10 +49,11 @@ fn env_key(language: String) -> String = {
 
 fn clip(text: String, label: String) -> Reference = {
   let n = string.len(text)
-  if n <= MAX_CHARS then Reference { label: label, text: text }
+  if n <= MAX_CHARS then Reference { label: label, text: text, path: "" }
   else Reference {
     label: label + " (first " + int.to_string(MAX_CHARS) + " of " + int.to_string(n) + " chars)",
     text: string.take(text, MAX_CHARS),
+    path: "",
   }
 }
 
@@ -73,7 +78,7 @@ effect fn in_project(root: String) -> Reference = {
   for rel in IN_PROJECT {
     if found.label == "" then {
       match fs.read_text(root + "/" + rel) {
-        ok(t) => if string.trim(t) != "" then found = clip(t, rel) else (),
+        ok(t) => if string.trim(t) != "" then found = { ...clip(t, rel), path: rel } else (),
         err(_) => (),
       }
     } else ()
@@ -119,10 +124,25 @@ fn render(r: Reference) -> String =
     + r.text
 
 test "no reference renders as nothing" { assert_eq(render(NONE), "") }
-test "a rendered reference names its source" { assert_eq(string.contains(render(Reference { label: "CHEATSHEET.md", text: "x" }), "CHEATSHEET.md"), true) }
+test "a rendered reference names its source" { assert_eq(string.contains(render(Reference { label: "CHEATSHEET.md", text: "x", path: "CHEATSHEET.md" }), "CHEATSHEET.md"), true) }
 test "off is a request for no reference, not a path" { assert_eq(is_off(" OFF "), true); assert_eq(is_off("none"), true); assert_eq(is_off("/tmp/x.md"), false) }
 test "env keys survive c++" { assert_eq(env_key("c++"), "C__") }
 test "env keys pass letters through" { assert_eq(env_key("almide"), "ALMIDE") }
 test "a short reference is kept whole" { assert_eq(clip("abc", "l").text, "abc") }
 test "a long reference is clipped to the budget" { assert_eq(string.len(clip(string.repeat("x", MAX_CHARS + 10), "l").text), MAX_CHARS) }
 test "a clipped reference says it was clipped" { assert_eq(string.contains(clip(string.repeat("x", MAX_CHARS + 10), "l").label, "first"), true) }
+
+test "the in-project tier records the file it read, so it is not read twice" {
+  let dir = fs.temp_dir() + "/golemide-ref-test"
+  let _ = fs.mkdir_p(dir)
+  let _ = fs.write(dir + "/CHEATSHEET.md", "the reference body")
+  let r = in_project(dir)!
+  assert_eq(r.path, "CHEATSHEET.md")
+  assert_eq(r.text, "the reference body")
+  let _ = fs.remove_all(dir)
+}
+
+test "the other tiers record no path, so nothing is filtered by accident" {
+  assert_eq(NONE.path, "")
+  assert_eq(clip("x", "/abs/notes.md").path, "")
+}

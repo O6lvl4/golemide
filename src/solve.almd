@@ -303,6 +303,18 @@ fn files_named_in(obs: observe.Observation) -> List[String] = match obs.baseline
 
 fn normalize_path(p: String) -> String = string.trim(string.strip_prefix(p, "./") ?? p)
 
+// The files to read, with the one that supplied the language reference taken out.
+//
+// Its full text is already in the prompt under LANGUAGE REFERENCE, and reading it
+// again as source sends it twice on every attempt. On the Almide exercise benchmark
+// that duplicate is CHEATSHEET.md, 41,210 characters, against a 6-attempt budget.
+//
+// An empty `ref_path` changes nothing: only the in-project tier names a file inside
+// the project, and a configured or toolchain reference cannot collide with the list.
+fn paths_to_read(selected: List[String], ref_path: String) -> List[String] =
+  if ref_path == "" then selected
+  else list.filter(selected, (p) => normalize_path(p) != ref_path)
+
 // Ask which files to read. The answer is checked against reality; a path
 // not in the list is dropped and said out loud.
 effect fn select_files(creds: llm.Credentials, context: String, obs: observe.Observation, max: Int, model: String, quiet: Bool) -> (List[String], Float) = {
@@ -576,6 +588,17 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
     let (selected, select_cost) = select_files(creds, context, obs, opts.max_files, opts.model, quiet)!
     total_cost = total_cost + select_cost
     var paths = selected
+    // The file that supplied the LANGUAGE REFERENCE is already in the prompt, whole.
+    // Reading it again as a source file sends it twice, every attempt: on the Almide
+    // exercise benchmark that is CHEATSHEET.md at 41,210 characters, so 82,420 go out
+    // where 41,210 would do, and the duplicate competes for the same budget as the code
+    // the model actually has to change. `small_project_sources` cannot see the
+    // collision — it only skips build files — so the filter belongs here, where the
+    // reference is known.
+    if list.len(paths_to_read(paths, ref.path)) < list.len(paths) then {
+      paths = paths_to_read(paths, ref.path)
+      note(quiet, "not re-reading " + ref.path + ": it is the language reference, already in the prompt")!
+    } else ()
     if not quiet then eprintln("  reading: " + (if list.is_empty(paths) then "(nothing)" else string.join(paths, ", "))) else ()
 
     var history = ""
@@ -777,4 +800,16 @@ test "an editable file is headed with the size a replacement has to match" {
   assert(string.contains(context, "3 lines, 20 bytes"))
   assert(string.contains(context, "a replacement must be all of it"))
   assert(list.contains(editable, "small.rs"))
+}
+
+test "the reference's own file is not read again as source" {
+  let selected = ["CHEATSHEET.md", "roman_numerals.almd"]
+  assert_eq(paths_to_read(selected, "CHEATSHEET.md"), ["roman_numerals.almd"])
+  assert_eq(paths_to_read(["./CHEATSHEET.md", "x.almd"], "CHEATSHEET.md"), ["x.almd"])
+}
+
+test "a reference from outside the project filters nothing" {
+  let selected = ["CHEATSHEET.md", "roman_numerals.almd"]
+  assert_eq(paths_to_read(selected, ""), selected)
+  assert_eq(paths_to_read(selected, "docs/CHEATSHEET.md"), selected)
 }
