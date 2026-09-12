@@ -102,13 +102,23 @@ $sigs"
   cost=$(grep -oE '\$[0-9]+\.[0-9]+' "$log" | tail -1 | tr -d '$'); [ -z "$cost" ] && cost=0
   attempts=$(grep -c '^\[edit\]' "$log" 2>/dev/null | tr -d '\n ')
   [ -z "$attempts" ] && attempts=0
-  # Did it choose to read the reference? That is the whole thesis, and it
-  # is a decision the agent makes, not one the harness makes for it.
-  if grep -q 'reading:.*CHEATSHEET' "$log"; then read_cheat=yes; else read_cheat=no; fi
+  # Was the reference in the prompt at all, and from which tier?
+  #
+  # This used to grep for `reading: … CHEATSHEET`, on the reasoning that choosing to
+  # read it is the agent's decision and the whole thesis. That reading was wrong even
+  # before the loop stopped sending the file twice: reference tier 2 finds
+  # CHEATSHEET.md at the project root and puts its full text in every prompt, so the
+  # model always had it whether or not it also asked to read the file. The old field
+  # measured a redundant second copy, not a decision.
+  #
+  # golemide says which tier answered, so record that instead. `none` is the case
+  # worth seeing — it means the model was asked to write Almide with no reference.
+  read_cheat=$(sed -n 's/^ *reference: \(.*\)$/\1/p' "$log" | head -1)
+  [ -z "$read_cheat" ] && read_cheat=unknown
 
   printf '%s\t%s\t%s\t%s\t%s\n' "$ex" "$result" "$attempts" "$cost" "$read_cheat" \
     >> "$WORK/results.tsv"
-  printf '%-22s %-6s cheatsheet-read=%s\n' "$ex" "$result" "$read_cheat"
+  printf '%-22s %-6s reference=%s\n' "$ex" "$result" "$read_cheat"
 }
 export -f run_one strip_impl
 export EXDIR CHEAT WORK AGENT_ROOT ATTEMPTS
@@ -163,17 +173,16 @@ echo
 echo "== results =="
 python3 - "$WORK/results.tsv" <<'PY'
 import sys
+from collections import Counter
 rows = [l.rstrip("\n").split("\t") for l in open(sys.argv[1]) if l.strip()]
 p = sum(r[1] == "PASS" for r in rows)
 n = len(rows)
 cost = sum(float(r[3] or 0) for r in rows)
-read = sum(r[4] == "yes" for r in rows)
 print(f"solved              {p}/{n}  ({p / n * 100:.1f}%)" if n else "no results")
 print(f"cost                ${cost:.4f}")
-print(f"read the cheatsheet {read}/{n}")
+print(f"reference tier      {dict(sorted(Counter(r[4] for r in rows).items()))}")
 if n:
     won = [r for r in rows if r[1] == "PASS"]
-    from collections import Counter
     print("solved on attempt  ", dict(sorted(Counter(r[2] for r in won).items())))
     bad = [r[0] for r in rows if r[1] == "FAIL"]
     if bad:
