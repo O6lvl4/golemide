@@ -1,0 +1,75 @@
+// Where an attempt's prompt budget goes, measured without calling a model.
+//
+// The loop's whole leverage is what it puts in front of the model, so the shape of
+// that string is worth a number. Every part of it is reachable from pure or
+// observe-only functions, which means the audit costs nothing and can run in CI.
+//
+// This found a 47% duplicate: `reference` tier 2 reads CHEATSHEET.md and emits it as
+// the LANGUAGE REFERENCE, and the same file then survived into `small_project_sources`
+// and was read again by `render_files`. 87,387 characters where 46,005 would do, on
+// every attempt, competing with the code the model actually has to change.
+//
+//   almide run bench/budget.almd -- <root> <verify-command> [task]
+//
+// Reading the output: `reference` is the floor — it is the point of the tool, and on
+// Almide it is ~41 KB. Anything else that approaches it deserves an explanation.
+
+import process
+import self.observe
+import self.reference
+import self.solve
+
+let LANGUAGE = "almide"
+
+local fn pct(part: Int, whole: Int) -> String =
+  if whole == 0 then "0%" else int.to_string(100 * part / whole) + "%"
+
+local fn row(label: String, chars: Int, whole: Int) -> String =
+  "  " + string.pad_end(label, 22, " ") + string.pad_start(int.to_string(chars), 8, " ")
+    + string.pad_start(pct(chars, whole), 7, " ")
+
+effect fn main() -> Unit = {
+  let args = process.args()
+  let root = list.get(args, 1) ?? "."
+  let verify = list.get(args, 2) ?? ""
+  let task = list.get(args, 3) ?? "Make the verification command pass."
+  guard verify != "" else err("usage: almide run bench/budget.almd -- <root> <verify-command> [task]")
+
+  let obs = observe.observe(root, verify, 6, 120000, "", [])!
+  let ref = reference.reference_for(root, LANGUAGE)!
+  let ref_text = reference.render(ref)
+  let baseline = match obs.baseline { some(b) => b.stdout + "\n" + b.stderr, none => "" }
+  let excerpt = solve.failure_view(verify, baseline, root, 60, true)!
+  let context = solve.render_observation(obs, task, excerpt, ref_text)
+
+  // What selection would pick, and what it picks after the reference is taken out.
+  let picked = list.take(obs.files, 6)
+  let kept = solve.paths_to_read(picked, ref.path)
+  let (block, _) = solve.render_files(root, kept, true)!
+  let prompt = solve.edit_prompt(context, block, "", false, verify)
+  let whole = string.len(prompt)
+
+  println("root      " + root)
+  println("verify    " + verify)
+  println("reference " + (if ref.label == "" then "(none)" else ref.label))
+  println("")
+  println("  " + string.pad_end("part", 22, " ") + string.pad_start("chars", 8, " ") + string.pad_start("share", 7, " "))
+  println(row("language reference", string.len(ref_text), whole))
+  println(row("failure excerpt", string.len(excerpt), whole))
+  println(row("context (total)", string.len(context), whole))
+  println(row("files block", string.len(block), whole))
+  println(row("prompt (attempt 1)", whole, whole))
+  println("")
+  println("  baseline output was " + int.to_string(string.len(baseline)) + " chars, sent as " + int.to_string(string.len(excerpt)))
+  println("  files read: " + (if list.is_empty(kept) then "(none)" else string.join(kept, ", ")))
+
+  // The duplicate this script was written to catch, reported as a regression check.
+  if ref.path != "" and list.len(kept) < list.len(picked) then {
+    let (dup_block, _) = solve.render_files(root, picked, true)!
+    let dup = string.len(dup_block) - string.len(block)
+    println("")
+    println("  " + ref.path + " is the reference and is NOT read again: " + int.to_string(dup)
+      + " chars saved per attempt (" + pct(dup, whole + dup) + " of the un-deduplicated prompt)")
+  } else ()
+  ok(())
+}
