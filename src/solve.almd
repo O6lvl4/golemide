@@ -232,7 +232,18 @@ effect fn phase(quiet: Bool, name: String, detail: String) -> Unit = if quiet th
 fn schema(s: String) -> Value = json.parse(s) ?? value.object([])
 
 // How the observation is shown to the model. Facts, in a fixed order.
-fn render_observation(obs: observe.Observation, task: String, baseline_excerpt: String, language_reference: String) -> String = {
+//
+// `show_baseline` is true only on the first attempt. The baseline is captured once,
+// before any edit, so from attempt 2 on it is not current — and it was being sent
+// under the header `CURRENT TEST OUTPUT`, first in the prompt, ahead of the code. The
+// failure that is true by then is the one `attempt_record` puts in the history, so the
+// stale copy is dropped rather than restated: one failure per prompt, and the one that
+// is still happening.
+//
+// Two diagnostics with the wrong one labelled authoritative and placed first is worse
+// than its token count suggests — it invites the next attempt to repair a failure the
+// last attempt already moved.
+fn render_observation(obs: observe.Observation, task: String, baseline_excerpt: String, language_reference: String, show_baseline: Bool) -> String = {
   var parts: List[String] = []
   list.push(parts, "=== TASK ===\n" + task)
   let fp_lang = option.map(obs.fingerprint, (f) => f.language) ?? "unknown"
@@ -246,7 +257,7 @@ fn render_observation(obs: observe.Observation, task: String, baseline_excerpt: 
   if language_reference != "" then list.push(parts, language_reference) else ()
   list.push(parts, "=== FILES (" + int.to_string(list.len(obs.files)) + ") ===\n" + string.join(obs.files, "\n") + (if obs.files_omitted != "" then "\n" + obs.files_omitted else ""))
   if string.trim(obs.repo_map) != "" then list.push(parts, "=== REPO MAP (ranked by how central each symbol is) ===\n" + obs.repo_map) else ()
-  match obs.baseline {
+  match (if show_baseline then obs.baseline else none) {
     some(b) => list.push(parts, "=== CURRENT TEST OUTPUT (exit " + int.to_string(b.code) + (if b.timed_out then ", TIMED OUT" else "") + ") ===\n$ " + b.command + "\n" + (if baseline_excerpt == "" then "(no output)" else baseline_excerpt)),
     none => (),
   }
@@ -571,7 +582,10 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
   let ref = reference.reference_for(obs.root, lang)!
   if not quiet and ref.label != "" then eprintln("  reference: " + ref.label) else ()
   if not quiet and ref.label == "" and lang != "" then eprintln("  reference: (none for " + lang + ")") else ()
-  let context = render_observation(obs, task, baseline_excerpt, reference.render(ref))
+  // Two renderings, both pure and both built once: the first attempt sees the baseline
+  // test output, every later one does not. See `render_observation` for why.
+  let context = render_observation(obs, task, baseline_excerpt, reference.render(ref), true)
+  let retry_context = render_observation(obs, task, "", reference.render(ref), false)
   var attempts: List[Attempt] = []
   var warnings: List[String] = []
   var total_cost = 0.0
@@ -619,7 +633,10 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
       let started_at = env.millis()
       phase(quiet, "edit", if polishing then "polish" else "attempt " + int.to_string(n) + "/" + int.to_string(opts.max_attempts))!
       let (block, read) = render_files(obs.root, paths, quiet)!
-      let prompt = edit_prompt(context, block, history, polishing, obs.verify_command)
+      // A polish is included: it runs after a PASS, so a failing baseline is stale
+      // there too, and it is the one request that is shown no history at all.
+      let seen = if polishing or history != "" then retry_context else context
+      let prompt = edit_prompt(seen, block, history, polishing, obs.verify_command)
 
       var edits: List[Edit] = []
       var explanation = ""
@@ -812,4 +829,28 @@ test "a reference from outside the project filters nothing" {
   let selected = ["CHEATSHEET.md", "roman_numerals.almd"]
   assert_eq(paths_to_read(selected, ""), selected)
   assert_eq(paths_to_read(selected, "docs/CHEATSHEET.md"), selected)
+}
+
+test "a retry is not shown the baseline output, which is no longer current" {
+  let baseline = observe.CommandResult { command: "almide test x.almd", code: 1,
+    stdout: "FAILED: expected 42 got 7", stderr: "", timed_out: false, duration_ms: 3, spawn_error: "" }
+  let obs = observe.Observation { root: ".", fingerprint: none, verify_command: "almide test x.almd",
+    verify_source: "user", files: ["x.almd"], files_omitted: "", repo_map: "", repo_map_warnings: [],
+    baseline: some(baseline), harness_broken: "" }
+
+  let first = render_observation(obs, "Fix it.", "FAILED: expected 42 got 7", "", true)
+  assert(string.contains(first, "CURRENT TEST OUTPUT"))
+  assert(string.contains(first, "expected 42 got 7"))
+
+  // The section goes entirely, not just its body: an empty `CURRENT TEST OUTPUT` header
+  // is the same lie with fewer characters.
+  let retry = render_observation(obs, "Fix it.", "", "", false)
+  assert(not string.contains(retry, "CURRENT TEST OUTPUT"))
+  assert(not string.contains(retry, "expected 42 got 7"))
+  assert(string.len(retry) < string.len(first))
+
+  // Everything a retry still needs is kept.
+  assert(string.contains(retry, "=== TASK ==="))
+  assert(string.contains(retry, "almide test x.almd"))
+  assert(string.contains(retry, "x.almd"))
 }

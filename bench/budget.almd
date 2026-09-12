@@ -9,7 +9,19 @@
 // and was read again by `render_files`. 87,387 characters where 46,005 would do, on
 // every attempt, competing with the code the model actually has to change.
 //
+// It then found a second one, of a different kind: the baseline test output is captured
+// once, before any edit, and was sent unchanged on every attempt under the header
+// `CURRENT TEST OUTPUT`, first in the prompt. From attempt 2 on that is not current —
+// the live failure is the one in the history — so the prompt carried two diagnostics
+// with the stale one labelled authoritative. Worth 5-7% of every retry prompt
+// (2,851-3,588 chars on four of the harder exercises), and the label matters more than
+// the size.
+//
 //   almide run bench/budget.almd -- <root> <verify-command> [task]
+//
+// Measure it on a project the harness has actually stripped, not on a reference
+// solution: a passing project's "baseline" is a success message of ~100 characters, and
+// reading 0.3% off that is how this was mismeasured the first time.
 //
 // Reading the output: `reference` is the floor — it is the point of the tool, and on
 // Almide it is ~41 KB. Anything else that approaches it deserves an explanation.
@@ -40,7 +52,8 @@ effect fn main() -> Unit = {
   let ref_text = reference.render(ref)
   let baseline = match obs.baseline { some(b) => b.stdout + "\n" + b.stderr, none => "" }
   let excerpt = solve.failure_view(verify, baseline, root, 60, true)!
-  let context = solve.render_observation(obs, task, excerpt, ref_text)
+  let context = solve.render_observation(obs, task, excerpt, ref_text, true)
+  let retry_context = solve.render_observation(obs, task, "", ref_text, false)
 
   // What selection would pick, and what it picks after the reference is taken out.
   let picked = list.take(obs.files, 6)
@@ -48,6 +61,9 @@ effect fn main() -> Unit = {
   let (block, _) = solve.render_files(root, kept, true)!
   let prompt = solve.edit_prompt(context, block, "", false, verify)
   let whole = string.len(prompt)
+  // Attempt 2+ with an empty history is not a real prompt — the history is what a
+  // retry adds. It isolates one thing: what the first attempt's stale baseline cost.
+  let retry_bare = string.len(solve.edit_prompt(retry_context, block, "", false, verify))
 
   println("root      " + root)
   println("verify    " + verify)
@@ -59,6 +75,12 @@ effect fn main() -> Unit = {
   println(row("context (total)", string.len(context), whole))
   println(row("files block", string.len(block), whole))
   println(row("prompt (attempt 1)", whole, whole))
+  println(row("prompt (retry, base)", retry_bare, whole))
+  println("")
+  println("  the retry drops the baseline test output, which is captured before any edit and"
+    + " is not current from attempt 2 on: " + int.to_string(whole - retry_bare) + " chars ("
+    + pct(whole - retry_bare, whole) + " of attempt 1), and one fewer diagnostic competing"
+    + " with the live one in the history")
   println("")
   println("  baseline output was " + int.to_string(string.len(baseline)) + " chars, sent as " + int.to_string(string.len(excerpt)))
   println("  files read: " + (if list.is_empty(kept) then "(none)" else string.join(kept, ", ")))
