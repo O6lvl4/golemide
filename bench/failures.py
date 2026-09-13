@@ -69,6 +69,27 @@ being delivered whole (41,369 chars, under the 48,000 budget, verified unclipped
 So the honest state: the whole-file protocol is worth fixing at 13% (and 18% above 6 KB),
 and a replacement edit format is now implemented for it. But it is not the gap, and the
 gap that remains on this corpus is not obviously the harness's to close.
+
+## The last harness lever on that 41%, checked and ruled out
+
+If the compiler's diagnostics were reaching the model stripped of their guidance, that
+would be a harness defect worth 41%. They are not. Across the 41 logs carrying a
+syntax-gate rejection there are 383 diagnostics:
+
+    coded  error[Exxx]  -> `almide explain <code>` is run and appended   59%
+    bare   error: ...   -> no explain lookup                             40%
+
+The 40% is not a hole. `almide explain` takes a code, so there is nothing to look up for a
+parse error, and Almide's parse errors already carry their own guidance -- the most common
+ones are "Expected top-level declaration (fn, effect fn, type, let, ...)", "`let rec` is
+OCaml/SML syntax; Almide functions are recursive", "'let' is not an expression in Almide".
+The message IS the explanation. `gate.write_checked` keeps stdout and stderr together, so
+the hint lines travel with the error, and `repair_prompt` puts the whole thing in the next
+request.
+
+The harness is already telling the model clearly what is wrong with its Almide, in the
+compiler's own words, one round after it wrote it. It writes invalid Almide anyway. That
+is a fluency gap, and nothing in this file suggests the harness can close it.
 """
 
 import collections
