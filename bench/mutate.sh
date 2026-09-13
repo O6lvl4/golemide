@@ -61,14 +61,32 @@ command -v almide >/dev/null || { echo "almide not on PATH" >&2; exit 2; }
 #
 # A mutant that has to be killed counts as caught: a verify command that never
 # returns has not accepted the change.
+#
+# Kill the process GROUP, not the pid. `almide test` runs the compiled mutant in a
+# `wasmtime` child, and killing only the parent orphans it — an infinite-loop mutant
+# then keeps a wasmtime process spinning after this script has exited and reported.
+# The first version of this function did that, and nine orphans from one run were
+# still running long enough afterwards to drive the machine out of memory and have
+# an unrelated background job killed.
+#
+# `set -m` gives the subshell its own process group, so `kill -TERM -$pid` reaches
+# every descendant. TERM first so wasmtime can unwind, then KILL for anything left.
 VERIFY_TIMEOUT="${MUT_TIMEOUT:-20}"
 run_verify() {
   local dir=$1 file=$2
+  set -m
   ( cd "$dir" && almide test "$file" >/dev/null 2>&1 ) &
   local pid=$!
+  set +m
   local waited=0
   while kill -0 "$pid" 2>/dev/null; do
-    [ "$waited" -ge "$VERIFY_TIMEOUT" ] && { kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 124; }
+    if [ "$waited" -ge "$VERIFY_TIMEOUT" ]; then
+      kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+      sleep 1
+      kill -9 "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      return 124
+    fi
     sleep 1; waited=$((waited + 1))
   done
   wait "$pid"
