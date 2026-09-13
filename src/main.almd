@@ -134,7 +134,21 @@ effect fn solve_with(a: Args, task: String, root: String, quiet: Bool, polish_on
     match obs.baseline { some(b) => eprintln("baseline: exit " + int.to_string(b.code) + " in " + int.to_string(b.duration_ms) + "ms"), none => () }
     for w in obs.repo_map_warnings { eprintln("warning: " + w) }
   } else ()
-  if list.is_empty(obs.files) then { eprintln("\nno source files found under " + obs.root + "\n  nothing here can be read, so nothing can be fixed."); ok(3) }
+  // An empty root is only a dead end when nothing may be created. With --create it is the
+  // ordinary starting state for work that writes a file that does not exist yet, and
+  // refusing there refuses the whole task before the model is asked anything.
+  //
+  // Measured on Terminal-Bench 2.0, 2026-09-13: three of ten pilot tasks
+  // (filter-js-from-html, count-dataset-tokens, openssl-selfsigned-cert) ship no source at
+  // all -- their package carries a Dockerfile and an instruction that says "create
+  // /app/filter.py" -- and all three ended here, in under 45 seconds, for $0.00, having
+  // never called the model. 26 of the 89 tasks ship no source files in their package.
+  if list.is_empty(obs.files) and not map.contains(a.flags, "create") then {
+    eprintln("\nno source files found under " + obs.root
+      + "\n  nothing here can be read, so nothing can be fixed."
+      + "\n  If the work is to write a file that does not exist yet, pass --create.")
+    ok(3)
+  }
   else if obs.harness_broken != "" then {
     eprintln("\nthe verify command did not run: " + obs.harness_broken + "\n  $ " + obs.verify_command + "\n" + (option.map(obs.baseline, (b) => observe.tail(string.trim(b.stdout + "\n" + b.stderr), 10)) ?? "") + "\nFix the command (or the environment) and run again. Nothing the agent writes can change this outcome.")
     ok(3)
