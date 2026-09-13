@@ -29,7 +29,12 @@ type Options = { max_attempts: Int, max_files: Int, model: String, allow_create:
 
 let SELECT_SCHEMA = "{\"type\":\"object\",\"properties\":{\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Paths copied exactly from the FILES list. No others.\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"files\",\"reason\"],\"additionalProperties\":false}"
 
-let EDIT_SCHEMA = "{\"type\":\"object\",\"properties\":{\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"The file's path, exactly as it appears in the FILES list.\"},\"source\":{\"type\":\"string\",\"description\":\"Every line of the file as it should exist on disk after your change — the COMPLETE file. Never a file name, never a diff, never a description of the change, never only the changed part.\"}},\"required\":[\"path\",\"source\"],\"additionalProperties\":false}},\"explanation\":{\"type\":\"string\"}},\"required\":[\"edits\",\"explanation\"],\"additionalProperties\":false}"
+// Two ways to say a change, and the model picks. `source` replaces the file;
+// `replacements` name exact text to swap. Above roughly 6 KB a whole-file rewrite is the
+// thing most likely to go wrong -- 72% of answers for such files were refused for their
+// shape, against 11% under 2 KB (bench/failures.py) -- so the schema now offers a way to
+// change three lines without restating four hundred.
+let EDIT_SCHEMA = "{\"type\":\"object\",\"properties\":{\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"The file's path, exactly as it appears in the FILES list.\"},\"source\":{\"type\":\"string\",\"description\":\"Every line of the file as it should exist on disk after your change — the COMPLETE file. Never a file name, never a description of the change, never only the changed part. Use this for a small file or a rewrite; for a targeted change in a large file use replacements instead.\"},\"replacements\":{\"type\":\"array\",\"description\":\"Targeted edits to this file, applied in order. Use these INSTEAD OF source when the file is large and your change is local. Do not send both.\",\"items\":{\"type\":\"object\",\"properties\":{\"old\":{\"type\":\"string\",\"description\":\"Text copied EXACTLY from the file as shown, whitespace included, and long enough to occur exactly once. If it occurs twice the edit is refused, so include surrounding lines to make it unique.\"},\"new\":{\"type\":\"string\",\"description\":\"What replaces it. Empty string deletes the matched text.\"}},\"required\":[\"old\",\"new\"],\"additionalProperties\":false}}},\"required\":[\"path\"],\"additionalProperties\":false}},\"explanation\":{\"type\":\"string\"}},\"required\":[\"edits\",\"explanation\"],\"additionalProperties\":false}"
 
 let SYSTEM = """
 You are a careful software engineer fixing one specific problem in an existing codebase.
@@ -38,7 +43,7 @@ Rules that matter more than anything else:
 - Only claim things you can see in the material you were given. You were shown the real file list, the real file contents, and the real test output. Do not invent paths, symbols, commands or APIs.
 - Fix the actual cause. Making the test pass by deleting the test, deleting the import, inlining the function under test, or special-casing the test's inputs is a failure, not a fix.
 - Preserve everything you were not asked to change: imports, formatting, comments, unrelated functions. You are editing a file that other people work in.
-- When you emit a file, emit the whole file, exactly as it should appear on disk.
+- When you emit a file's `source`, emit the whole file, exactly as it should appear on disk. When you emit `replacements`, copy `old` exactly from the file you were shown — from the text, not from memory — and make it long enough to occur only once.
 """
 
 // What is asked once the verify command already passes. It names the shapes
@@ -64,7 +69,11 @@ fn edit_prompt(context: String, block: String, history: String, polishing: Bool,
   context + "\n\n=== FILE CONTENTS ===\n" + (if block == "" then "(none could be read)" else block)
     + (if history != "" and not polishing then "\n\n=== WHAT HAS ALREADY BEEN TRIED ===\n" + history else "")
     + "\n\n=== QUESTION ===\n" + (if polishing then POLISH_QUESTION else "Fix the problem.")
-    + "\nFor each file you change, emit its COMPLETE new contents: every line from the first to the last, including the lines you did not touch. A fragment, a single function, or a diff will be discarded — the text you emit replaces the file on disk exactly as written.\nChange as few files as possible. Do not touch a file you were not shown completely. TRUNCATED files are read-only context.\n"
+    + "\nFor each file you change, say the change in ONE of two ways.\n"
+    + "  `source` — the file's COMPLETE new contents: every line from the first to the last, including the lines you did not touch. The text replaces the file on disk exactly as written, so a fragment or a single function will be discarded.\n"
+    + "  `replacements` — a list of {old, new}. `old` is text copied exactly from the file as shown, whitespace included, long enough to occur exactly once; `new` is what goes there. Text that occurs twice is refused, so include surrounding lines.\n"
+    + "Prefer `replacements` when the file is long and your change is local: restating four hundred lines to change three is where this goes wrong. Prefer `source` for a small file or a genuine rewrite. Never send both for one file.\n"
+    + "Change as few files as possible. Do not touch a file you were not shown completely. TRUNCATED files are read-only context.\n"
     + (if verify_command != "" then "Success is \"" + verify_command + "\" exiting zero for the right reason.\n" else "")
     + "Do not weaken, skip or delete tests to achieve it."
 
@@ -139,6 +148,54 @@ effect fn repair_prompt(obs: observe.Observation, rejected: List[Rejected], quie
 // rest may not. Nothing here touches the disk: a path outside the root, a file
 // that was never shown, a creation that was not allowed and a degenerate write
 // are all refused before the gate ever sees them.
+// A replacement the model asked for: the exact text to find, and what to put there.
+type Replacement = { old: String, new: String }
+
+fn replacements_of(v: Value) -> List[Replacement] =
+  list.filter_map(json.get_array(v, "replacements") ?? [], (r) =>
+    match (json.get_string(r, "old"), json.get_string(r, "new")) {
+      (some(o), some(n)) => some(Replacement { old: o, new: n }),
+      _ => none,
+    })
+
+// Apply replacements to a file's current text, or say exactly why not.
+//
+// Why this exists. `bench/failures.py` over 280 exercise-runs: 55% of failures are the
+// harness discarding the answer for its SHAPE rather than a test rejecting it, and the
+// rate tracks the size of the file the model has to reproduce -- 11% under 2 KB, 25% at
+// 2-6 KB, 72% above 6 KB, where nearly half the runs then fail. `grade-report` (11.5 KB)
+// was refused in 12 of 12 runs. Demanding a complete 400-line rewrite to change three
+// lines is the harness asking for the thing most likely to go wrong.
+//
+// The safety property is UNIQUENESS, not cleverness. `old` must occur exactly once in the
+// file: found twice, the model has not said which it meant, and guessing would silently
+// edit the wrong line. Not found at all is usually the model quoting from memory instead
+// of from the text it was shown. Both are refused by name, and the reason travels into
+// the retry history, so the next attempt is told what was wrong rather than just "failed".
+//
+// Replacements are applied in order, each against the result of the last, so a later one
+// may legitimately target text an earlier one introduced.
+fn apply_replacements(current: String, reps: List[Replacement]) -> Result[String, String] = {
+  var text = current
+  var failure = ""
+  for r in reps {
+    if failure != "" then ()
+    else if r.old == "" then { failure = "a replacement had an empty `old`; it must be the exact text to find" }
+    else {
+      match string.index_of(text, r.old) {
+        none => { failure = "could not find this text in the file, so nothing was changed — quote it exactly as the file shows it, whitespace included: \"" + string.take(r.old, 120) + "\"" },
+        some(i) => {
+          let rest = string.drop(text, i + string.len(r.old))
+          if option.is_some(string.index_of(rest, r.old)) then {
+            failure = "this text appears more than once, so it does not say which one to change — include enough surrounding lines to make it unique: \"" + string.take(r.old, 120) + "\""
+          } else { text = string.take(text, i) + r.new + rest }
+        },
+      }
+    }
+  }
+  if failure != "" then err(failure) else ok(text)
+}
+
 effect fn collect_edits(obs: observe.Observation, answer: Value, read: List[String], allow_create: Bool, quiet: Bool, into: List[Edit]) -> Result[Batch, String] = {
   var edits = into
   var rejected: List[Rejected] = []
@@ -148,7 +205,22 @@ effect fn collect_edits(obs: observe.Observation, answer: Value, read: List[Stri
       some(e0) => {
         let p = resolve_edit_path(e0.path, obs.root, read)
         if p != normalize_path(e0.path) then note(quiet, "resolved " + e0.path + " -> " + p)! else ()
-        let source = unwrap_source(e0.source)
+        // A replacement batch becomes a complete source here, against the file as it is
+        // now. Everything downstream -- the fragment guard, the syntax gate, the write,
+        // the diff in the history -- then sees exactly what it saw before, which is the
+        // point: the second edit format adds a way to SAY the change, not a second path
+        // through the checks that decide whether it is allowed.
+        let reps = replacements_of(v)
+        let (source, rep_error) = if list.is_empty(reps) then (unwrap_source(e0.source), "")
+          else match apply_replacements(fs.read_text(obs.root + "/" + p) ?? "", reps) {
+            ok(s) => (s, ""),
+            err(e) => ("", e),
+          }
+        if rep_error != "" then {
+          list.push(rejected, Rejected { path: p, why: rep_error })
+          note(quiet, "rejected " + p + ": " + rep_error)!
+        } else {
+        if not list.is_empty(reps) then note(quiet, "applied " + int.to_string(list.len(reps)) + " replacement(s) to " + p)! else ()
         let on_disk = fs.exists(obs.root + "/" + p)
         if not list.contains(read, p) and on_disk then { list.push(rejected, Rejected { path: p, why: "not among the files it was shown completely" }); note(quiet, "rejected " + p + ": not among the files it was shown completely")! }
         else if not on_disk and not allow_create then { list.push(rejected, Rejected { path: p, why: "does not exist (creation not enabled)" }); note(quiet, "rejected " + p + ": does not exist (creation not enabled)")! }
@@ -166,6 +238,7 @@ effect fn collect_edits(obs: observe.Observation, answer: Value, read: List[Stri
             }
             list.push(edits, Edit { path: p, source: source })
           }
+        }
         }
       },
     }
@@ -639,9 +712,16 @@ effect fn gaming_warnings(obs: observe.Observation, attempts: List[Attempt], cha
   out
 }
 
-fn edit_of(v: Value) -> Edit? = match (json.get_string(v, "path"), json.get_string(v, "source")) {
-  (some(p), some(s)) => some(Edit { path: p, source: s }),
-  _ => none,
+// An edit names a path and then says the change in ONE of two ways: the complete new
+// source, or a list of replacements. A path with neither is malformed.
+fn edit_of(v: Value) -> Edit? = match json.get_string(v, "path") {
+  none => none,
+  some(p) => match json.get_string(v, "source") {
+    some(s) => some(Edit { path: p, source: s }),
+    // `source` is absent: the replacements are read from the same value in
+    // `collect_edits`, which has the file on disk to apply them against.
+    none => if list.is_empty(replacements_of(v)) then none else some(Edit { path: p, source: "" }),
+  },
 }
 
 fn first_line(s: String) -> String = string.take(list.first(string.split(s, "\n")) ?? "", 80)
@@ -936,6 +1016,71 @@ test "the reference's own file is not read again as source" {
   let selected = ["CHEATSHEET.md", "roman_numerals.almd"]
   assert_eq(paths_to_read(selected, "CHEATSHEET.md"), ["roman_numerals.almd"])
   assert_eq(paths_to_read(["./CHEATSHEET.md", "x.almd"], "CHEATSHEET.md"), ["x.almd"])
+}
+
+test "replacements apply when unique, and are refused when they are not" {
+  let file = "fn a() -> Int = 1\nfn b() -> Int = 2\nfn c() -> Int = 1\n"
+
+  // The ordinary case: unique text, swapped.
+  assert_eq(apply_replacements(file, [Replacement { old: "fn b() -> Int = 2", new: "fn b() -> Int = 9" }]),
+            ok("fn a() -> Int = 1\nfn b() -> Int = 9\nfn c() -> Int = 1\n"))
+
+  // Several, in order. The second targets text the first introduced, which is why they
+  // are applied against the running result rather than the original.
+  assert_eq(apply_replacements("x = 1\n", [
+              Replacement { old: "x = 1", new: "y = 1" },
+              Replacement { old: "y = 1", new: "y = 2" }]),
+            ok("y = 2\n"))
+
+  // Deletion is a replacement with an empty `new`.
+  assert_eq(apply_replacements(file, [Replacement { old: "fn b() -> Int = 2\n", new: "" }]),
+            ok("fn a() -> Int = 1\nfn c() -> Int = 1\n"))
+
+  // Ambiguous: `= 1` is on two lines, so the model has not said which it meant. Refused
+  // rather than guessed -- guessing here silently edits the wrong line.
+  assert(result.is_err(apply_replacements(file, [Replacement { old: "-> Int = 1", new: "-> Int = 7" }])))
+  match apply_replacements(file, [Replacement { old: "-> Int = 1", new: "-> Int = 7" }]) {
+    err(e) => assert(string.contains(e, "more than once")),
+    ok(_) => assert(false),
+  }
+
+  // Not present at all: usually a quote from memory rather than from the file.
+  match apply_replacements(file, [Replacement { old: "fn zzz()", new: "x" }]) {
+    err(e) => assert(string.contains(e, "could not find this text")),
+    ok(_) => assert(false),
+  }
+
+  // An empty `old` would match at position zero and mean nothing.
+  assert(result.is_err(apply_replacements(file, [Replacement { old: "", new: "x" }])))
+
+  // The first failure stops the batch, so a file is never left half-edited.
+  match apply_replacements(file, [
+          Replacement { old: "fn a() -> Int = 1", new: "fn a() -> Int = 5" },
+          Replacement { old: "fn nope()", new: "x" }]) {
+    err(_) => (),
+    ok(_) => assert(false),
+  }
+
+  // No replacements is not a failure; it is the whole-file form.
+  assert_eq(apply_replacements(file, []), ok(file))
+}
+
+test "an edit is well formed with either a source or replacements, and not with neither" {
+  let whole = json.parse("{\"path\":\"a.almd\",\"source\":\"fn a() = 1\"}") ?? value.object([])
+  match edit_of(whole) { some(e) => assert_eq(e.source, "fn a() = 1"), none => assert(false) }
+
+  // `source` absent but replacements present: well formed, and the source is filled in
+  // later by `collect_edits`, which has the file to apply them against.
+  let reps = json.parse("{\"path\":\"a.almd\",\"replacements\":[{\"old\":\"1\",\"new\":\"2\"}]}") ?? value.object([])
+  match edit_of(reps) { some(e) => assert_eq(e.path, "a.almd"), none => assert(false) }
+  assert_eq(list.len(replacements_of(reps)), 1)
+
+  // A path and nothing else says no change at all.
+  let bare = json.parse("{\"path\":\"a.almd\"}") ?? value.object([])
+  assert(option.is_none(edit_of(bare)))
+  // An empty replacement list is the same as none.
+  let empty = json.parse("{\"path\":\"a.almd\",\"replacements\":[]}") ?? value.object([])
+  assert(option.is_none(edit_of(empty)))
 }
 
 test "an edit path is resolved to the file it was shown, or left to be refused" {
