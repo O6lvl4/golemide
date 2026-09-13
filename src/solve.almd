@@ -146,7 +146,8 @@ effect fn collect_edits(obs: observe.Observation, answer: Value, read: List[Stri
     match edit_of(v) {
       none => list.push(rejected, Rejected { path: json.get_string(v, "path") ?? "?", why: "malformed edit" }),
       some(e0) => {
-        let p = normalize_path(e0.path)
+        let p = resolve_edit_path(e0.path, obs.root, read)
+        if p != normalize_path(e0.path) then note(quiet, "resolved " + e0.path + " -> " + p)! else ()
         let source = unwrap_source(e0.source)
         let on_disk = fs.exists(obs.root + "/" + p)
         if not list.contains(read, p) and on_disk then { list.push(rejected, Rejected { path: p, why: "not among the files it was shown completely" }); note(quiet, "rejected " + p + ": not among the files it was shown completely")! }
@@ -326,6 +327,49 @@ fn paths_to_read(selected: List[String], ref_path: String) -> List[String] =
   if ref_path == "" then selected
   else list.filter(selected, (p) => normalize_path(p) != ref_path)
 
+// The path the model named, resolved to a file it was actually shown.
+//
+// `select_files` already does this for the files-to-read answer — it resolves a bare
+// name against the project list and says `resolved "x" -> y`. The edit-application path
+// did not, so the same string was accepted in one place and refused in the other.
+//
+// Two shapes were measured being refused on files that plainly exist, across the
+// polyglot and Almide runs:
+//
+//   /tmp/pr-before/rust/two-bucket/src/lib.rs   the absolute path, which the prompt
+//                                               itself prints under `PROJECT / root:`.
+//                                               `fs.exists(root + "/" + p)` then joins a
+//                                               root onto an absolute path and asks
+//                                               about a path that cannot exist.  (9x)
+//   python/connect/connect.py                   the path from the benchmark's working
+//                                               directory, where the root IS
+//                                               python/connect.  (4x)
+//
+// 13 edits refused on files that were present and editable, each costing a round.
+//
+// Resolution is only ever to a member of `read` — the files shown completely — so a
+// resolved path is editable by construction, and this cannot widen what may be written.
+// A match must be UNIQUE: two candidates mean the name is ambiguous and the original is
+// returned so the caller refuses it, rather than guessing which file was meant.
+fn resolve_edit_path(raw: String, root: String, read: List[String]) -> String = {
+  let p = normalize_path(raw)
+  // An absolute path under the root is that file, named the long way.
+  let bare_root = string.strip_suffix(root, "/") ?? root
+  let unrooted = match string.strip_prefix(p, bare_root + "/") {
+    some(rest) => normalize_path(rest),
+    none => p,
+  }
+  if list.contains(read, unrooted) then unrooted
+  else {
+    // `a/b/c.py` naming the shown `c.py`, or the shown `b/c.py` naming `c.py`.
+    let tails = list.filter(read, (f) => string.ends_with(unrooted, "/" + f))
+    let heads = list.filter(read, (f) => string.ends_with(f, "/" + unrooted))
+    if list.len(tails) == 1 then list.first(tails) ?? unrooted
+    else if list.len(heads) == 1 then list.first(heads) ?? unrooted
+    else unrooted
+  }
+}
+
 // Ask which files to read. The answer is checked against reality; a path
 // not in the list is dropped and said out loud.
 effect fn select_files(creds: llm.Credentials, context: String, obs: observe.Observation, max: Int, model: String, quiet: Bool) -> (List[String], Float) = {
@@ -375,8 +419,21 @@ effect fn render_files(root: String, paths: List[String], quiet: Bool) -> (Strin
   for p in paths {
     var r = observe.read_for_model(root, p, 24000)!
     if r.truncated and r.error == "" then {
-      r = observe.read_for_model(root, p, 96000)!
-      note(quiet, "expanded read of " + p + " (up to 96000 characters)")!
+      // Expanding is worth it only if it makes the file COMPLETE. A complete file is
+      // editable, and that is the whole point of the wider budget; a file still
+      // truncated at 96,000 is read-only either way, so the wide read buys nothing and
+      // costs 72,000 characters of every attempt's prompt.
+      //
+      // Measured on Aider's polyglot benchmark: all 26 C++ exercises vendor Catch2 as
+      // test/catch.hpp, 656,886 bytes. It was selected as a project source, re-read at
+      // the expanded budget, and sent as 96,000 characters of read-only context on every
+      // attempt -- against a gigasecond.cpp of 76 bytes. The outline below is the part of
+      // an oversized file that is actually worth having.
+      let wide = observe.read_for_model(root, p, 96000)!
+      if not wide.truncated then {
+        r = wide
+        note(quiet, "expanded read of " + p + " (up to 96000 characters)")!
+      } else note(quiet, "far past the read budget: " + p + " stays a 24000-character excerpt (expanding to 96000 would still truncate)")!
     } else ()
     if r.error != "" then note(quiet, "rejected " + p + ": " + r.error)!
     else {
@@ -835,6 +892,19 @@ test "expanded reads retain the tail and partial files are not editable" {
   assert(list.contains(editable, "medium.rs"))
   assert(not list.contains(editable, "large.rs"))
   assert(string.contains(context, "TRUNCATED, READ-ONLY"))
+
+  // A file the wider budget cannot complete is not expanded into it. `large.rs` is
+  // 97,000 characters, so expanding to 96,000 would still truncate and would buy
+  // nothing -- it is read-only at either size. It stays near the 24,000 excerpt
+  // instead of taking 96,000 characters of every attempt's prompt.
+  //
+  // The number that made this matter: all 26 C++ exercises in Aider's polyglot
+  // benchmark vendor Catch2 at 656,886 bytes, next to a 76-byte implementation file.
+  assert(not string.contains(context, "fn unseen_tail() {}"))
+  assert(string.len(context) < 60000)
+
+  // `medium.rs` is 30,000 characters: the wider budget does complete it, so it is still
+  // expanded and still editable, with its tail intact. That is asserted above.
   let outside = observe.read_for_model(root, "../outside.rs", 10)!
   assert_eq(outside.error, "outside the project root")
   fs.remove_all(root)!
@@ -866,6 +936,36 @@ test "the reference's own file is not read again as source" {
   let selected = ["CHEATSHEET.md", "roman_numerals.almd"]
   assert_eq(paths_to_read(selected, "CHEATSHEET.md"), ["roman_numerals.almd"])
   assert_eq(paths_to_read(["./CHEATSHEET.md", "x.almd"], "CHEATSHEET.md"), ["x.almd"])
+}
+
+test "an edit path is resolved to the file it was shown, or left to be refused" {
+  let read = ["gigasecond.cpp", "gigasecond.h"]
+  let root = "/tmp/pc/cpp/gigasecond"
+
+  // The absolute path the prompt prints under `PROJECT / root:`. Measured 9 times.
+  assert_eq(resolve_edit_path("/tmp/pc/cpp/gigasecond/gigasecond.cpp", root, read), "gigasecond.cpp")
+  // A trailing slash on the root must not defeat the strip.
+  assert_eq(resolve_edit_path("/tmp/pc/cpp/gigasecond/gigasecond.h", root + "/", read), "gigasecond.h")
+  // Already correct, and `./`-prefixed, are both unchanged.
+  assert_eq(resolve_edit_path("gigasecond.cpp", root, read), "gigasecond.cpp")
+  assert_eq(resolve_edit_path("./gigasecond.cpp", root, read), "gigasecond.cpp")
+
+  // The path from the benchmark's working directory, where the root IS python/connect.
+  // Measured 4 times.
+  assert_eq(resolve_edit_path("python/connect/connect.py", "/w/python/connect", ["connect.py"]), "connect.py")
+  // And the other direction: a bare name for a file shown at a nested path.
+  assert_eq(resolve_edit_path("lib.rs", "/w/r", ["src/lib.rs"]), "src/lib.rs")
+
+  // What must still be refused. A file that does not exist is returned unchanged so the
+  // caller rejects it -- resolution must not invent a target.
+  assert_eq(resolve_edit_path("boost/date_time/posix_time/posix_time.hpp", root, read),
+            "boost/date_time/posix_time/posix_time.hpp")
+  // Ambiguity is not resolved by guessing: two shown files end with "/mod.rs".
+  assert_eq(resolve_edit_path("mod.rs", "/w", ["a/mod.rs", "b/mod.rs"]), "mod.rs")
+  // A path outside the root keeps its shape and stays refusable.
+  assert_eq(resolve_edit_path("/etc/passwd", root, read), "/etc/passwd")
+  // Nothing was shown, so nothing resolves.
+  assert_eq(resolve_edit_path("gigasecond.cpp", root, []), "gigasecond.cpp")
 }
 
 test "a reference from outside the project filters nothing" {
