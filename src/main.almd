@@ -32,10 +32,13 @@ Options
   --polish N      extra attempts that only simplify a passing result (default 0; measured at a 2-byte diff on one task)
   --quiet         only the final report
   --files-seen N  paths shown to the model (default 400)
+  --explore N     rounds of looking around before editing: the model names shell
+                  commands, they run, their output joins the prompt (default 0 = off).
+                  For tasks that ship no tests, where there is no verify command to have
   --timeout SEC   how long the verify command may take (default 120)
 """
 
-let VALUED = ["root", "verify", "attempts", "files", "model", "files-seen", "timeout", "task", "polish"]
+let VALUED = ["root", "verify", "attempts", "files", "model", "files-seen", "timeout", "task", "polish", "explore"]
 
 type Args = { cmd: String, rest: List[String], flags: Map[String, String] }
 
@@ -144,7 +147,11 @@ effect fn solve_with(a: Args, task: String, root: String, quiet: Bool, polish_on
   else {
     let opts = solve.Options { max_attempts: int.parse(map.get(a.flags, "attempts") ?? "6") ?? 6, max_files: int.parse(map.get(a.flags, "files") ?? "6") ?? 6,
       model: map.get(a.flags, "model") ?? ask.MODEL_WORK, allow_create: map.contains(a.flags, "create"), quiet: quiet, polish_only: polish_only,
-      polish: int.parse(map.get(a.flags, "polish") ?? "0") ?? 0 }
+      polish: int.parse(map.get(a.flags, "polish") ?? "0") ?? 0,
+      // Off by default: a run with a verify command needs no exploration, and the
+      // property that makes golemide trustworthy (a success is a command exiting zero)
+      // should not be traded away unless asked for.
+      explore: int.parse(map.get(a.flags, "explore") ?? "0") ?? 0 }
     let r = solve.solve(creds, task, obs, opts)!
     // A rolled-back polish leaves the tree exactly as it found it, which is not
     // the same news as a repair that landed.

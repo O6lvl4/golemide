@@ -25,7 +25,30 @@ type Attempt = { n: Int, read: List[String], edits: List[Edit], rejected: List[R
 // simpler version survived its verify. Without it a rolled-back polish
 // reports the same headline as one that was kept.
 type Outcome = { ok: Bool, attempts: List[Attempt], changed: List[String], cost_usd: Float, wall_ms: Int, warnings: List[String], harness_broken: String, polish_kept: Bool? }
-type Options = { max_attempts: Int, max_files: Int, model: String, allow_create: Bool, quiet: Bool, polish: Int, polish_only: Bool }
+type Options = { max_attempts: Int, max_files: Int, model: String, allow_create: Bool, quiet: Bool, polish: Int, polish_only: Bool, explore: Int }
+
+// Commands the model asks to run before it edits, so it can look at things `observe` did
+// not think to collect.
+//
+// Why this exists, measured. golemide only ever runs ONE command: the verify command. That
+// is what makes its "solved" trustworthy -- a success is always a command exiting zero --
+// and it is also what excludes it from a whole class of task. On Terminal-Bench 2.0 the
+// container ships no tests at all (they are injected after the agent exits), so there is no
+// verify command to have, and a run attempts nothing: measured, two trials, zero attempted.
+//
+// What Claude Code does there is not magic. It runs `ls`, compiles a file, executes it on a
+// small input, and builds its own partial signals out of what comes back. The capability is
+// choosing what to look at, and this is the smallest form of it.
+//
+// Read-only by convention, not by enforcement: the sandbox is the project directory and the
+// verify command already runs arbitrary shell, so a stricter promise here would be a
+// pretence. What IS enforced is the budget -- `--explore N` caps the rounds, default 0, so
+// the existing behaviour is unchanged unless asked for.
+let EXPLORE_SCHEMA = "{\"type\":\"object\",\"properties\":{\"commands\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Shell commands to run in the project root to understand the task. Prefer reading and running over guessing: ls, cat, compiling a file, executing it on a small input. At most 6.\"},\"reason\":{\"type\":\"string\",\"description\":\"What you are trying to find out.\"}},\"required\":[\"commands\",\"reason\"],\"additionalProperties\":false}"
+
+let EXPLORE_TIMEOUT_MS = 60000
+let EXPLORE_MAX_COMMANDS = 6
+let EXPLORE_OUTPUT_CHARS = 2000
 
 let SELECT_SCHEMA = "{\"type\":\"object\",\"properties\":{\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Paths copied exactly from the FILES list. No others.\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"files\",\"reason\"],\"additionalProperties\":false}"
 
@@ -466,6 +489,42 @@ fn resolve_edit_path(raw: String, root: String, read: List[String]) -> String = 
   }
 }
 
+// One round of looking around: the model names commands, they run, their output comes back
+// as text for the next prompt.
+//
+// The output of each command is clipped. A single `find /` would otherwise fill the whole
+// budget with paths and crowd out the thing the model asked to see, and the clip is reported
+// so the model knows it is reading a fragment rather than a short answer.
+effect fn explore_round(creds: llm.Credentials, context: String, root: String, model: String,
+                        quiet: Bool) -> Result[(String, Float), String] = {
+  let prompt = context + "\n\n=== QUESTION ===\nBefore changing anything: which shell commands would tell you what you need to know?\nThey run in the project root. Read files, list directories, compile something, run it on a small input — whatever answers the question you actually have.\nAt most " + int.to_string(EXPLORE_MAX_COMMANDS) + ". Do not change any file yet."
+  match ask.ask_json(creds, prompt, schema(EXPLORE_SCHEMA), ask.Options { system: SYSTEM, model: model, max_output_tokens: 2048, reasoning_effort: "low" }) {
+    err(e) => { note(quiet, "exploration failed: " + e)!; ok(("", 0.0)) },
+    ok(a) => {
+      let asked = list.take(list.map(json.get_array(a.value, "commands") ?? [], (v) => value.as_string(v) ?? ""), EXPLORE_MAX_COMMANDS)
+      let why = json.get_string(a.value, "reason") ?? ""
+      if list.is_empty(asked) then ok(("", a.cost_usd))
+      else {
+        if why != "" then note(quiet, "looking for: " + why)! else ()
+        var seen: List[String] = []
+        for c in asked {
+          if string.trim(c) == "" then ()
+          else {
+            note(quiet, "$ " + c)!
+            let r = observe.run(c, root, EXPLORE_TIMEOUT_MS)!
+            let body = string.trim(r.stdout + (if string.trim(r.stderr) == "" then "" else "\n" + r.stderr))
+            let clipped = if string.len(body) > EXPLORE_OUTPUT_CHARS
+              then string.take(body, EXPLORE_OUTPUT_CHARS) + "\n… (clipped at " + int.to_string(EXPLORE_OUTPUT_CHARS) + " of " + int.to_string(string.len(body)) + " chars)"
+              else body
+            list.push(seen, "$ " + c + "\n" + (if r.timed_out then "(timed out)" else if clipped == "" then "(no output, exit " + int.to_string(r.code) + ")" else clipped))
+          }
+        }
+        ok(("\n\n=== WHAT I RAN ===\n" + string.join(seen, "\n\n"), a.cost_usd))
+      }
+    },
+  }
+}
+
 // Ask which files to read. The answer is checked against reality; a path
 // not in the list is dropped and said out loud.
 effect fn select_files(creds: llm.Credentials, context: String, obs: observe.Observation, max: Int, model: String, quiet: Bool) -> (List[String], Float) = {
@@ -791,6 +850,18 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
     } else ()
     if not quiet then eprintln("  reading: " + (if list.is_empty(paths) then "(nothing)" else string.join(paths, ", "))) else ()
 
+    // Looking around, before anything is changed. Off unless `--explore N` asks for it, so
+    // a run that has a verify command behaves exactly as it did before.
+    var findings = ""
+    var explored = 0
+    while explored < opts.explore {
+      phase(quiet, "explore", int.to_string(explored + 1) + "/" + int.to_string(opts.explore))!
+      let (seen, cost) = explore_round(creds, context + findings, obs.root, opts.model, quiet)!
+      total_cost = total_cost + cost
+      findings = findings + seen
+      explored = explored + 1
+    }
+
     var history = ""
     var harness_broken = ""
     var unusable = 0          // attempts that produced no edit worth running; drives the ladder
@@ -811,7 +882,10 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
       let (block, read) = render_files(obs.root, paths, quiet)!
       // A polish is included: it runs after a PASS, so a failing baseline is stale
       // there too, and it is the one request that is shown no history at all.
-      let seen = if polishing or history != "" then retry_context else context
+      // What exploration found stays in every attempt's prompt. It was paid for once and it
+      // does not go stale the way the baseline diagnostic does: `ls` output and a compiler's
+      // opinion of the untouched code describe the task, not the last edit.
+      let seen = (if polishing or history != "" then retry_context else context) + findings
       let prompt = edit_prompt(seen, block, history, polishing, obs.verify_command)
 
       var edits: List[Edit] = []
