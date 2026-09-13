@@ -30,10 +30,11 @@ type Options = { max_attempts: Int, max_files: Int, model: String, allow_create:
 let SELECT_SCHEMA = "{\"type\":\"object\",\"properties\":{\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Paths copied exactly from the FILES list. No others.\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"files\",\"reason\"],\"additionalProperties\":false}"
 
 // Two ways to say a change, and the model picks. `source` replaces the file;
-// `replacements` name exact text to swap. Above roughly 6 KB a whole-file rewrite is the
-// thing most likely to go wrong -- 72% of answers for such files were refused for their
-// shape, against 11% under 2 KB (bench/failures.py) -- so the schema now offers a way to
-// change three lines without restating four hundred.
+// `replacements` name exact text to swap. Being refused as a FRAGMENT accounts for 13% of
+// failures overall and 18% of runs on files above 6 KB, against 2% under 2 KB
+// (bench/failures.py) -- so the schema offers a way to change three lines without
+// restating four hundred. A worthwhile 13%, not the harness's main gap; that file records
+// why an earlier reading of 72% was a bug in the census rather than a finding.
 let EDIT_SCHEMA = "{\"type\":\"object\",\"properties\":{\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"The file's path, exactly as it appears in the FILES list.\"},\"source\":{\"type\":\"string\",\"description\":\"Every line of the file as it should exist on disk after your change — the COMPLETE file. Never a file name, never a description of the change, never only the changed part. Use this for a small file or a rewrite; for a targeted change in a large file use replacements instead.\"},\"replacements\":{\"type\":\"array\",\"description\":\"Targeted edits to this file, applied in order. Use these INSTEAD OF source when the file is large and your change is local. Do not send both.\",\"items\":{\"type\":\"object\",\"properties\":{\"old\":{\"type\":\"string\",\"description\":\"Text copied EXACTLY from the file as shown, whitespace included, and long enough to occur exactly once. If it occurs twice the edit is refused, so include surrounding lines to make it unique.\"},\"new\":{\"type\":\"string\",\"description\":\"What replaces it. Empty string deletes the matched text.\"}},\"required\":[\"old\",\"new\"],\"additionalProperties\":false}}},\"required\":[\"path\"],\"additionalProperties\":false}},\"explanation\":{\"type\":\"string\"}},\"required\":[\"edits\",\"explanation\"],\"additionalProperties\":false}"
 
 let SYSTEM = """
@@ -160,12 +161,16 @@ fn replacements_of(v: Value) -> List[Replacement] =
 
 // Apply replacements to a file's current text, or say exactly why not.
 //
-// Why this exists. `bench/failures.py` over 280 exercise-runs: 55% of failures are the
-// harness discarding the answer for its SHAPE rather than a test rejecting it, and the
-// rate tracks the size of the file the model has to reproduce -- 11% under 2 KB, 25% at
-// 2-6 KB, 72% above 6 KB, where nearly half the runs then fail. `grade-report` (11.5 KB)
-// was refused in 12 of 12 runs. Demanding a complete 400-line rewrite to change three
-// lines is the harness asking for the thing most likely to go wrong.
+// Why this exists, stated at the size it actually measures. `bench/failures.py` over 280
+// exercise-runs: 13% of failures are the harness discarding the answer as a FRAGMENT --
+// the model changed three lines and sent three lines, where the protocol demands the whole
+// file. It rises with the size of the file: 2% under 2 KB, 14% at 2-6 KB, 18% above.
+//
+// A first pass at that census said 55% and named this the harness's main gap. That was a
+// bug in the census, not a finding: its signature matched a summary line golemide prints
+// when every edit was refused for ANY reason, which swept in syntax-gate refusals -- the
+// model writing invalid code. Corrected, the protocol is 13% and the syntax gate is 41%.
+// This change is worth making at 13%; it is not the lever the overstated number implied.
 //
 // The safety property is UNIQUENESS, not cleverness. `old` must occur exactly once in the
 // file: found twice, the model has not said which it meant, and guessing would silently

@@ -13,46 +13,62 @@ themselves.
 
 ## What it found, over 280 exercise-runs and 43 failures (2026-09-13)
 
-    edits rejected for shape (fragment / whole-file protocol)   55%
-    nothing usable produced (the same mechanism, overlapping)   48%
-    ran out of attempts still failing tests — real capability   18%
-    edit refused on a path                                      13%
-    stuck on the same failure                                    9%
-    verify timed out                                             9%
+    syntax gate — the code the model wrote is not valid in the language   41%
+    ran out of attempts still failing tests — real capability             20%
+    fragment — the whole-file protocol was violated                       13%
+    edit refused on a path                                                13%
+    stuck on the same failure                                              9%
+    verify timed out                                                       9%
 
-**The dominant failure is the harness refusing the model's answer for its shape, not
-the model failing to solve the problem.** And it scales with the size of the file the
-model has to reproduce:
+**The dominant failure is the model writing code the language rejects**, caught by the
+syntax gate before any test runs. The two big categories are disjoint — 18 failures show
+the syntax gate and no fragment, 6 show a fragment and no syntax gate, 0 show both — so
+they are separate populations and not two views of one thing.
 
-    target file    runs   shape-rejected   failed
-    < 2 KB          155        11%           9%
-    2-6 KB           81        25%           9%
-    > 6 KB           44        72%          47%
+## The first version of this file got that backwards
 
-    grade-report   11,511 B   12 runs   12 shape-rejected   9 failed
-    config-merger  10,907 B   12 runs   11 shape-rejected   6 failed
+It reported "55% edits rejected for shape" and named the whole-file edit protocol as the
+harness's gap. That was a measurement error in this script, not a finding. The signature
+included golemide's note `every edit was rejected for its shape`, which it emits when ALL
+edits were refused **for any reason** — including a syntax-gate refusal, which is the
+model writing bad code and has nothing to do with shape. Separating the two moves the
+protocol from 55% to 13% and promotes the syntax gate from invisible to 41%.
 
-`edit_prompt` requires the whole file: "For each file you change, emit its COMPLETE new
-contents ... A fragment, a single function, or a diff will be discarded." Above about
-6 KB the model stops complying, and nearly half of those runs fail.
+The lesson is about the instrument, not the harness: a signature that matches a summary
+line instead of the specific cause will attribute every failure to whichever cause the
+summary was written for.
 
-## The honest caveat
+## And the size correlation was mostly a language correlation
 
-Large files are also harder, so size is confounded with difficulty and this is not proof
-that the protocol causes the failures. Two things still point at the protocol. The
-mechanism is visible rather than inferred — the log says the harness discarded the answer
-for its shape, before any test ran. And the failure rate is identical (9%) in the two
-smaller buckets while shape rejection more than doubles across them, so the jump to 47%
-arrives together with shape rejection reaching 72% rather than tracking size smoothly.
+    target file    runs   fragment   syntax gate   failed
+    < 2 KB          155      2%          5%          9%
+    2-6 KB           81     14%         11%          9%
+    > 6 KB           44     18%         54%         47%
 
-## The lever this implies
+    language       runs   fragment   syntax gate   failed
+    almide           79     12%         44%         29%
+    rust             60     16%          6%         15%
+    cpp             131      2%          1%          7%
+    python           10     10%          0%         10%
 
-A partial-edit format — search/replace blocks or a unified diff — instead of demanding
-complete file contents. That is what this benchmark's own author uses: aider ships both a
-"whole" and a "diff" edit format precisely because the choice moves the score, and the
-diff format is the one used for large files. Testing it here means adding a second edit
-format and running this census again; it is the measurement the next session should make,
-and unlike prompt size it has not yet been ruled out.
+The syntax gate tracks the failure rate across the size buckets (5/11/54 against 9/9/47);
+fragment rejection does not (2/14/18). But the >6 KB bucket is mostly Almide exercises --
+`grade-report` and `config-merger` are the two largest files in that corpus -- so size and
+language are confounded here, and language is the stronger signal by a wide margin: 44%
+syntax-gate on Almide against 0-6% everywhere else.
+
+## What that means for the harness
+
+On languages the model knows, this harness is already at 90%+ and its remaining failures
+are mostly genuine capability: cpp fails 7% of runs with a 1% syntax-gate rate. The large
+Almide gap is the model not knowing Almide -- it writes `||`, misuses `guard`, reaches for
+`..` -- and that is a fluency problem the reference is meant to solve. The reference IS
+being delivered whole (41,369 chars, under the 48,000 budget, verified unclipped), so
+"send the reference" is already done and is not enough.
+
+So the honest state: the whole-file protocol is worth fixing at 13% (and 18% above 6 KB),
+and a replacement edit format is now implemented for it. But it is not the gap, and the
+gap that remains on this corpus is not obviously the harness's to close.
 """
 
 import collections
@@ -61,13 +77,20 @@ import os
 import re
 import sys
 
-# Each signature is something the harness said about the answer, not a guess about it.
+# Each signature names a SPECIFIC cause, never a summary line.
+#
+# `every edit was rejected for its shape` and `produced nothing usable` are both summaries
+# — golemide prints them when every edit was refused for ANY reason — and matching them is
+# what made the first version of this script blame the edit protocol for failures that
+# were really the model writing invalid code. They are deliberately absent below.
 SIGNATURES = [
-    ("edits rejected for shape", r"is a \d+-byte fragment|malformed edit|every edit was rejected for its shape"),
+    ("syntax gate — the code it wrote is invalid", r"apply rejected .*edit\.write:"),
+    ("fragment — whole-file protocol violated", r"is a \d+-byte fragment"),
     ("edit refused on a path", r"does not exist \(creation not enabled\)|not among the files it was shown"),
+    ("replacement did not apply", r"could not find this text in the file|appears more than once, so it does not say"),
+    ("malformed edit JSON", r"malformed edit"),
     ("stuck on the same failure", r"same failure as attempt"),
     ("verify timed out", r"TIMED OUT|the command timed out"),
-    ("nothing usable produced", r"produced nothing usable"),
 ]
 
 
@@ -113,18 +136,20 @@ def main(dirs):
     for name, n in counts.most_common():
         print(f"  {n:>3}/{len(fails)}  {100 * n // len(fails):>3}%  {name}")
 
-    # Shape rejection against the size of what the model had to reproduce.
-    per = collections.defaultdict(lambda: [0, 0])
+    # The two causes worth separating, per exercise. Reported side by side because the
+    # whole point of the correction above is that they are different problems.
+    per = collections.defaultdict(lambda: [0, 0, 0])
     for ex, res, hits, _ in runs:
         a = per[ex]
         a[0] += 1
-        a[1] += "edits rejected for shape" in hits
-    worst = sorted(per.items(), key=lambda kv: -kv[1][1])[:8]
-    if any(n for _, (_, n) in worst):
-        print("\nexercises whose answers were most often refused for their shape:")
-        for ex, (n, s) in worst:
-            if s:
-                print(f"  {s:>2}/{n:<3} {ex}")
+        a[1] += "fragment — whole-file protocol violated" in hits
+        a[2] += "syntax gate — the code it wrote is invalid" in hits
+    worst = sorted(per.items(), key=lambda kv: -(kv[1][1] + kv[1][2]))[:8]
+    if any(f + s for _, (_, f, s) in worst):
+        print(f"\n{'exercise':20}{'runs':>5}{'fragment':>10}{'syntax gate':>13}")
+        for ex, (n, f, s) in worst:
+            if f or s:
+                print(f"  {ex:18}{n:>5}{f:>10}{s:>13}")
     return 0
 
 
