@@ -157,6 +157,29 @@ counting_command() {
   esac
 }
 
+# Run a command in its own process group and kill the GROUP on the deadline, so a
+# build that outlives the timeout cannot escape as an orphan. Returns 0 on success,
+# 124 on timeout. See the call site for what the leak actually cost.
+bounded_verify() {
+  local dir=$1 cmd=$2 limit=$3
+  set -m
+  ( cd "$dir" && bash -c "$cmd" ) >/dev/null 2>&1 &
+  local pid=$!
+  set +m
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$limit" ]; then
+      kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+      sleep 1
+      kill -9 "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      return 124
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  wait "$pid"
+}
+
 run_one() {
   local lang=$1 ex=$2
   local src="$POLYGLOT/$lang/exercises/practice/$ex"
@@ -187,8 +210,23 @@ $(cat "$d/.docs/instructions.append.md")"
   # produced one: unique-name generation that never terminates) hung this
   # line for 1h37m while the agent's own verify had correctly given up at
   # 120s. macOS has no `timeout`; perl's alarm is everywhere.
+  #
+  # The alarm has to reach the whole tree, and `perl -e 'alarm shift; exec @ARGV'`
+  # did not. SIGALRM is delivered to that one process; `exec` replaces perl with the
+  # bash, the bash dies on the signal, and its cmake/make/c++ children are reparented
+  # to init and keep compiling. Nothing ever reaps them.
+  #
+  # That is not a tidiness problem. Orphans from a run that had already FINISHED and
+  # reported PASS/FAIL kept a core busy afterwards: one `cmake --build` left here by
+  # cpp/zebra-puzzle starved the next benchmark run so badly it completed 2 of 26
+  # exercises in 44 minutes, and the OS killed two runs in one session for memory
+  # pressure. A leaking harness corrupts the measurements that come after it.
+  #
+  # Same shape as bench/mutate.sh: `set -m` gives the subshell its own process group,
+  # so the kill reaches every descendant. TERM first so a compiler can unwind, then
+  # KILL for whatever is left.
   local result=FAIL
-  if ( cd "$d" && perl -e 'alarm shift; exec @ARGV' 300 bash -c "$vc" ) >/dev/null 2>&1; then result=PASS; fi
+  if bounded_verify "$d" "$vc" "${VERIFY_DEADLINE:-300}"; then result=PASS; fi
 
   local cost wall attempts
   cost=$(grep -oE '\$[0-9]+\.[0-9]+' "$log" | tail -1 | tr -d '$'); [ -z "$cost" ] && cost=0
@@ -199,7 +237,7 @@ $(cat "$d/.docs/instructions.append.md")"
     >> "$WORK/results.tsv"
   printf '%-11s %-28s %s\n' "$lang" "$ex" "$result"
 }
-export -f run_one verify_for prepare_dir count_tests counting_command
+export -f run_one verify_for prepare_dir count_tests counting_command bounded_verify
 export POLYGLOT WORK AGENT_ROOT ATTEMPTS JAVA_HOME
 
 mkdir -p "$WORK"; [ -n "${BENCH_ONLY:-}" ] || : > "$WORK/results.tsv"
