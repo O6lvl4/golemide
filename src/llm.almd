@@ -177,8 +177,13 @@ fn parse_completion(body: String) -> Result[Completion, String] = {
 // Turn a completion into the response the loop uses, or the error it must see.
 fn settle(c: Completion, model: String, duration_ms: Int, hedged: Bool, won_by_hedge: Bool) -> Result[Response, String] = {
   if c.finish == "length" and string.trim(c.content) == "" then {
-    let reasoned = if string.trim(c.reasoning) != "" then ", budget consumed by reasoning" else ""
-    err("truncated before any content (finish_reason=length" + reasoned + "); raise max_completion_tokens")
+    // The advice differs by cause, and the wrong advice was being given for the more
+    // common cause: when reasoning consumed the budget, a larger budget is the weaker
+    // lever, because the reasoning takes the extra room as well.
+    let reasoned = string.trim(c.reasoning) != ""
+    let cause = if reasoned then ", budget consumed by reasoning" else ""
+    let advice = if reasoned then "; spend less on reasoning" else "; raise max_completion_tokens"
+    err("truncated before any content (finish_reason=length" + cause + ")" + advice)
   } else {
     let details: Value? = match c.usage { some(u) => ok_of(value.field(u, "prompt_tokens_details")), none => none }
     let cached = if num(details, "cached_tokens") > 0 then num(details, "cached_tokens")
@@ -410,11 +415,27 @@ test "assemble_stream folds deltas and keeps the fullest usage" {
   assert(float.abs(r.cost_usd - 50.0 * NEURON_USD) < 0.0000001)
 }
 
-test "a length finish with no content is an error naming the remedy" {
-  let c = Completion { content: "", reasoning: "thinking", finish: "length", usage: none }
-  match settle(c, "cf:glm-5.3-flash", 1, false, false) {
+test "a length finish with no content names the remedy its cause actually calls for" {
+  // Reasoning ate the budget: a bigger budget feeds the reasoning, so the remedy is to
+  // think less. Measured on glm-5.3: the same prompt at 4096 tokens answers at `low`
+  // effort and returns nothing at `high`.
+  let reasoned = Completion { content: "", reasoning: "thinking", finish: "length", usage: none }
+  match settle(reasoned, "cf:glm-5.3-flash", 1, false, false) {
     ok(_) => assert(false),
-    err(e) => assert(string.contains(e, "raise max_completion_tokens")),
+    err(e) => {
+      assert(string.contains(e, "consumed by reasoning"))
+      assert(string.contains(e, "spend less on reasoning"))
+      assert(not string.contains(e, "raise max_completion_tokens"))
+    },
+  }
+  // No reasoning at all, so the budget really was too small.
+  let starved = Completion { content: "", reasoning: "", finish: "length", usage: none }
+  match settle(starved, "cf:glm-5.3-flash", 1, false, false) {
+    ok(_) => assert(false),
+    err(e) => {
+      assert(string.contains(e, "raise max_completion_tokens"))
+      assert(not string.contains(e, "reasoning"))
+    },
   }
 }
 
