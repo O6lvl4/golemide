@@ -97,6 +97,7 @@ fn edit_prompt(context: String, block: String, history: String, polishing: Bool,
     + "  `source` — the file's COMPLETE new contents: every line from the first to the last, including the lines you did not touch. The text replaces the file on disk exactly as written, so a fragment or a single function will be discarded.\n"
     + "  `replacements` — a list of {old, new}. `old` is text copied exactly from the file as shown, whitespace included, long enough to occur exactly once; `new` is what goes there. Text that occurs twice is refused, so include surrounding lines.\n"
     + "Prefer `replacements` when the file is long and your change is local: restating four hundred lines to change three is where this goes wrong. Prefer `source` for a small file or a genuine rewrite. Never send both for one file.\n"
+    + "If what you must write is too large to emit in one answer, BUILD IT ACROSS ATTEMPTS. Write a first part now, ending with a marker line you choose, and say in `explanation` what comes next. On the following attempt, replace that marker with the next part and a new marker. A file grown in four attempts is finished; one answer that gets cut off mid-way is nothing.\n"
     + "Change as few files as possible. Do not touch a file you were not shown completely. TRUNCATED files are read-only context.\n"
     + (if verify_command != "" then "Success is \"" + verify_command + "\" exiting zero for the right reason.\n" else "")
     + "Do not weaken, skip or delete tests to achieve it."
