@@ -21,6 +21,14 @@ fn is_transient(m: String) -> Bool = regex.is_match("status (408|409|425|429|500
 fn is_server_timeout(m: String) -> Bool = regex.is_match("status 408([^0-9]|$)|request timeout", string.to_lower(m))
 fn is_budget_truncation(m: String) -> Bool = regex.is_match("truncated before any content|raise max_completion_tokens", string.to_lower(m))
 fn is_rate_limit(m: String) -> Bool = regex.is_match("status 429([^0-9]|$)|rate limit|too many requests", string.to_lower(m))
+// A truncation in which the reasoning stream, not the answer, consumed the budget. It
+// wants the OPPOSITE retry from an answer cut off mid-sentence: less thinking, not more
+// room. Measured on glm-5.3 (Workers AI, 2026-09-13) with one prompt at 4096 output
+// tokens: `low` finished with 2620 characters of answer after 3269 of reasoning, while
+// `high` returned zero characters of answer after 12346 of reasoning and finish=length.
+// Reasoning expands to fill what it is given, so tripling the budget on its own buys the
+// reasoning three times the room and the answer still never starts.
+fn is_reasoning_truncation(m: String) -> Bool = regex.is_match("consumed by reasoning", string.to_lower(m))
 
 let EFFORTS = ["low", "medium", "high"]
 
@@ -153,9 +161,16 @@ effect fn ask_json(creds: llm.Credentials, prompt: String, schema: Value, o: Opt
         } else outcome = Got(r.text)
       },
       err(m) => {
-        if is_budget_truncation(m) and budget < 65536 then {
+        if is_budget_truncation(m) and (budget < 65536 or (is_reasoning_truncation(m) and effort != "low")) then {
+          // Both levers point the same way here, and only one of them was being
+          // pulled: more room for the answer AND less spent before it starts. Without
+          // the effort step, a reasoning truncation at `high` retries three times
+          // larger and the reasoning simply takes the extra room too -- which is how a
+          // call that began at 2048 tokens reached 55296 and still returned nothing.
+          let before = effort + "/" + int.to_string(budget)
           budget = int.min(65536, budget * 3)
-          outcome = Retry(m + " [retrying at " + int.to_string(budget) + " output tokens]")
+          if is_reasoning_truncation(m) then { effort = lower_effort(effort) }
+          outcome = Retry(m + " [retrying at " + effort + "/" + int.to_string(budget) + ", was " + before + "]")
         } else if is_server_timeout(m) then {
           // less thinking and a smaller budget both shorten the generation;
           // after two such shrinks a third timeout is the provider's answer
@@ -233,4 +248,22 @@ test "truncation detection and the effort ladder" {
   assert(is_server_timeout("status 408: AiError: Request timeout"))
   assert(is_transient("status 503: down"))
   assert(not is_transient("status 400: bad schema"))
+}
+
+test "a reasoning truncation and a starved answer are different failures" {
+  let reasoned = "truncated before any content (finish_reason=length, budget consumed by reasoning); spend less on reasoning"
+  let starved = "truncated before any content (finish_reason=length); raise max_completion_tokens"
+  // Both are budget truncations, so both still retry.
+  assert(is_budget_truncation(reasoned))
+  assert(is_budget_truncation(starved))
+  // Only one of them is asking for less thinking. Telling them apart is the whole point:
+  // the retry that raises the budget without lowering the effort hands the extra room to
+  // the reasoning, which is what it was already spending everything on.
+  assert(is_reasoning_truncation(reasoned))
+  assert(not is_reasoning_truncation(starved))
+  // The ladder the retry walks down, and its floor: at `low` there is nothing left to
+  // give up, so a reasoning truncation there is a real failure rather than a retry.
+  assert_eq(lower_effort("high"), "medium")
+  assert_eq(lower_effort("medium"), "low")
+  assert_eq(lower_effort("low"), "low")
 }
