@@ -172,6 +172,24 @@ fn replacements_of(v: Value) -> List[Replacement] =
 // model writing invalid code. Corrected, the protocol is 13% and the syntax gate is 41%.
 // This change is worth making at 13%; it is not the lever the overstated number implied.
 //
+// Measured on the case it exists for: a 10,003-byte file with one wrong line, the same
+// size class as `grade-report`. Both builds solved it; what differs is what the harness
+// made the model do.
+//
+//   whole-file only  attempt 1 refused -- "is a 45-byte fragment of a 10003-byte file"
+//                    -- then re-asked and restated all 10,003    $0.003517   49s
+//   replacements     "applied 1 replacement(s)"                  $0.001450    4s
+//
+// -59% cost and -92% wall clock, and the old build reproduced the census signature
+// verbatim: the model wanted to send 45 bytes, was refused, and paid for the whole file.
+// The refusal costs a ROUND, which is what turns into a failure once attempts are scarce
+// -- so the value here is not the tokens, it is the round that is no longer spent being
+// told to say the same thing at 200x the length.
+//
+// The model picks correctly without being told which case it is in: it used replacements
+// here, and whole-file `source` on a stripped benchmark exercise, where filling in every
+// function body genuinely is a rewrite.
+//
 // The safety property is UNIQUENESS, not cleverness. `old` must occur exactly once in the
 // file: found twice, the model has not said which it meant, and guessing would silently
 // edit the wrong line. Not found at all is usually the model quoting from memory instead
