@@ -52,6 +52,45 @@
 # So: for a pass-rate claim this benchmark is the wrong instrument in both directions.
 # Unconstrained it is saturated at 23/23; constrained to 2 attempts it has 24 paired
 # trials per arm, which cannot resolve anything smaller than a very large effect.
+#
+# ## The same question on a benchmark we did not write
+#
+# `bench/exercism.sh` runs Aider's polyglot benchmark -- 225 Exercism problems chosen
+# by someone else, with a public leaderboard. Rust and C++, all 3 attempts, one arm
+# with none of the prompt fixes and one with all three (results-polyglot-*.tsv):
+#
+#   arm            solved     $/attempt
+#   before         49/54      0.00354
+#   all three      49/54      0.00362   (+2.3%)
+#
+#   better 2  worse 2  p=1.000
+#   (+ cpp/crypto-square, + rust/alphametics, - cpp/gigasecond, - rust/xorcism)
+#
+# Identical, on 54 paired trials of a corpus with real headroom. Cost is unchanged too,
+# and that part was predicted rather than discovered: `reference_for` resolves through a
+# project CHEATSHEET.md or an Almide-specific toolchain command, so a Rust or C++
+# exercise has no reference and there is nothing to deduplicate. **The -41.5% above is
+# specific to projects that carry their own reference file.**
+#
+# ## What that means, stated against the claim it refutes
+#
+# The thesis these fixes were built on is that a generic harness throws away a large
+# share of an open-weight model's measured ability, and that prompt overhead is where it
+# goes. Two of these fixes removed 42% and 5-7% of the prompt, and the effect on solve
+# rate was measured twice, on two corpora, at 24 and 54 paired trials: zero both times.
+#
+# Prompt bloat is not what this harness loses points to. It costs money, and the money
+# is worth recovering, but a token saved is not a problem solved. Whatever the harness
+# gap is made of, these three defects were not it -- and that is worth more than the
+# cost number, because it rules out the explanation that was easiest to believe.
+#
+# Checks run before trusting the 90.7%, since it would otherwise be suspiciously near
+# the top of a public leaderboard: the Rust verify command is
+# `cargo test -q -- --include-ignored`, so the #[ignore] on every test after the first
+# is overridden (exercism.sh:132 documents that trap); golemide's own gaming_warnings
+# fired on nothing; and the harness check confirms the stub fails where the reference
+# solution passes. The score is high because 3 attempts with test feedback is an easier
+# protocol than the leaderboard's, not because the tests were weakened.
 
 set -uo pipefail
 
