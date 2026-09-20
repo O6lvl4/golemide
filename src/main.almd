@@ -197,9 +197,9 @@ effect fn finish(r: Result[Int, String]) -> Unit = match r {
 effect fn main() -> Unit = {
   let a = parse_args(env.args())
   if a.cmd == "" or a.cmd == "help" or map.contains(a.flags, "help") then { println(USAGE); process.exit(if a.cmd == "" then 1 else 0) }
-  else if a.cmd == "llm-test" then finish(result.map(llm_test(), (_) => 0))
-  else if a.cmd == "observe" then finish(result.map(run_observe(a), (_) => 0))
-  else if a.cmd == "solve" then finish(run_solve(a))
-  else if a.cmd == "polish" then finish(run_polish(a))
+  else if a.cmd == "llm-test" then finish(result.map(llm_test(), (_) => 0))!
+  else if a.cmd == "observe" then finish(result.map(run_observe(a), (_) => 0))!
+  else if a.cmd == "solve" then finish(run_solve(a))!
+  else if a.cmd == "polish" then finish(run_polish(a))!
   else { eprintln("unknown command: " + a.cmd + "\n" + USAGE); process.exit(1) }
 }
