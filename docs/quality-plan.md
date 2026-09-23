@@ -235,3 +235,188 @@ The remaining 45 is the attempt loop's own state — ten mutable variables that
 would have to become a record — which is a different kind of change from lifting
 out a cohesive block, and is not attempted here. The CI number is a ratchet at
 45: it may fall, and raising it needs a reason written beside it.
+
+## Loosened replacement matching (2026-09-22)
+
+`replace.almd` finds a replacement's `old` on a fixed ladder when it is not in the
+file verbatim: line-number prefixes stripped, escapes undone, a uniform indentation
+change ignored, each line trimmed, then first-and-last-line anchors. Ported from
+ZCode's `edit-matchers.ts`, with `new` re-indented by the same shift and line endings
+restored on write. Measured once, both arms concurrently on one machine, Python and
+Rust, the first 30 exercises of each, `cf:glm-5.3-flash`, three attempts
+(`bench/results-replace-{before,after}.tsv`):
+
+|                              | before | after |
+|---|---|---|
+| solved                       | 55/60  | 54/60 |
+| cost                         | $0.183 | $0.155 |
+| replacement batches applied  | 41     | 36    |
+| replacements refused         | 7      | 2     |
+| rescued by the ladder        | —      | 4 (3 indentation, 1 trimmed) |
+
+Every rescued replacement was in an exercise that then passed. The two refusals
+that remain quote text the file never contained. The solved counts differ by one
+exercise in sixty, inside this project's measured run-to-run variance; one of the
+six `after` failures is a Rust build that hit the 120 s verify deadline under six
+concurrent cargo builds, not an edit. Path refusals were zero in both arms, so the
+"did you mean" suggestion added alongside was not exercised by this corpus — the
+13% path-refusal rate in `bench/failures.py` came from the C++ and Almide runs.
+
+## The polyglot leaderboard protocol, full run (2026-09-22)
+
+`bench/leaderboard.sh`: all 225 exercises, two attempts (the board's pass_rate_2),
+`cf:glm-5.3-flash`, four in parallel, one run
+(`bench/results-leaderboard-glm-5.3-flash-run1.tsv`):
+
+| language | solved | rate | cost |
+|---|---|---|---|
+| cpp | 20/26 | 76.9% | $0.073 |
+| go | 34/39 | 87.2% | $0.061 |
+| java | 33/47 | 70.2% | $0.089 |
+| javascript | 37/49 | 75.5% | $0.097 |
+| python | 26/34 | 76.5% | $0.054 |
+| rust | 20/30 | 66.7% | $0.087 |
+| **total** | **170/225** | **75.6%** | **$0.46** |
+
+Failure census: 40 of 55 ran out of attempts still failing tests, 5 stuck on the
+same failure, 4 verify timeouts at the 300 s deadline (go/robot-simulator,
+cpp/zebra-puzzle, python/forth, java/book-store — not edits), 3 syntax gate, 2
+path refusals, 2 replacements that did not apply. No provider errors; every
+exercise reached a verdict.
+
+For scale, not for a ranking: Aider's own leaderboard (last updated 2025-11-20)
+lists DeepSeek-V3.2-Exp reasoner at 74.2% for $1.30 as its best open-weight
+entry, and Gemini 2.5 Pro at 76.5%. Three things stop this being a comparison.
+It is one run, and the 60-exercise runs above moved by one exercise between
+identical runs. The board is stale: no GLM-5.x, DeepSeek-V4 or Kimi-K3 entry, so
+"above every open-weight entry" is against models a year older. And the harness
+differs: an attempt here may include a shape-repair re-ask before its verify,
+and the syntax gate and diagnostic explanations are golemide's, not the model's —
+which is the point of measuring an agent, but it means the number is
+agent+model, and the board's numbers are Aider+model. Separating the two needs
+Aider run with `cf:glm-5.3-flash` under the same protocol.
+
+`bench/aider.sh` is that control arm: Aider's own harness in its own Docker image,
+the model pointed at the same Cloudflare endpoint by name, the board's two tries and
+`diff` format, with cost computed from Aider's recorded token counts at the prices in
+`src/llm.almd`. The endpoint returns the model's reasoning in a separate
+`reasoning_content` field and the answer in `content`, which is the shape Aider's
+client already handles. Not yet run: it needs Docker, which was not running when
+the script was written.
+
+### Aider, same model, same protocol (2026-09-22)
+
+`bench/aider.sh`, Aider `5dc9490bb`, `diff` format, two tries, `cf:glm-5.3-flash`
+at reasoning effort `low`, four threads, one run
+(`bench/results-aider-glm-5.3-flash-low-run1.tsv`):
+
+| language | Aider | golemide |
+|---|---|---|
+| cpp | 20/26 76.9% | 20/26 76.9% |
+| go | 27/39 69.2% | 34/39 87.2% |
+| java | 27/47 57.4% | 33/47 70.2% |
+| javascript | 33/49 67.3% | 37/49 75.5% |
+| python | 27/34 79.4% | 26/34 76.5% |
+| rust | 17/30 56.7% | 20/30 66.7% |
+| **total** | **151/225 67.1%, $0.47** | **170/225 75.6%, $0.46** |
+
+Same model, same 225 exercises, same two attempts, same cost. golemide never
+escalated to the stronger model in its run (0 of 225; seven attempts went to
+`medium` reasoning). Aider's pass_rate_1 was 20.9%: most of its solves came from the
+second try, after seeing test output.
+
+Reasoning effort is the condition to be honest about. Aider was first run at the
+model's default effort and stopped: in an hour it finished 9 exercises, and the
+four in flight had each hit Cloudflare's 408 request timeout up to five times,
+retried identically each time. golemide classifies that 408 as a server timeout
+and lowers the effort; Aider retries. So both arms ran at `low`, which is where
+golemide's ladder starts. A reader may say Aider was not run at its own default;
+the reply is that at its own default it did not run.
+
+One run each. The 60-exercise repeats above moved by one exercise; an eight-point
+gap on 225 is well outside that, but `RUNS=3` on both is what would settle it.
+
+### ZCode, stopped after 25 exercises (2026-09-22)
+
+`bench/zcode.sh`: ZCode `872ad96` headless, one session per exercise with the task
+and the verify command, `cf:glm-5.3-flash` at reasoning `low`, 900 s wall cap, run on
+the host through `bench/exercism.sh`. Stopped after 25 exercises
+(`bench/results-zcode-glm-5.3-flash-low-partial.tsv`), 24 of them C++:
+
+| on those 25 | solved | cost |
+|---|---|---|
+| ZCode | 24/25 | $0.454 |
+| golemide (2 attempts) | 20/25 | $0.072 |
+| Aider (2 tries) | 20/25 | $0.127 |
+
+No test file was modified in any ZCode directory. ZCode is not under the two-attempt
+protocol: it runs the tests itself as often as it likes, and made 4-17 model requests
+per exercise.
+
+It was stopped because it changed the machine. On `cpp/gigasecond` it found Boost
+missing and ran `brew install boost` (Homebrew `boost` created 22:15:26; nothing else
+was installed). That also exposed a flaw in the earlier arms: the two C++ exercises
+that need Boost, `gigasecond` and `meetup`, fail at CMake configure on a host without
+it — golemide's baselines exited 1 in 0.7 s and 0.4 s — so golemide's run on the host
+could not solve them, while Aider's Docker image ships Boost. golemide's final
+`gigasecond` passes all five tests once Boost is present. Its C++ score, and so its
+total, is understated by up to two exercises; that has not been re-measured.
+Excluding those two, the 23 remaining exercises give ZCode 22, golemide 20, Aider 19.
+
+The benchmark needs one environment for every arm: a container with every
+toolchain and library the corpus uses, where an agent's shell cannot reach the host.
+
+## One environment for every agent (2026-09-23)
+
+`bench/container.sh` builds one image — Aider's benchmark image (Python 3.11, Go 1.21,
+Java 21, Node 20, Rust, CMake, Boost) plus almide v0.63.0-rc3, golemide, gramide, hew,
+ctxgate and ZCode `872ad96` — and runs every agent inside it, so no agent's shell
+reaches the host and the only thing that differs between arms is the agent. Each arm
+snapshots installed packages before and after; no arm changed them. `cf:glm-5.3-flash`
+throughout, one run per arm, and golemide pinned to that model with `--strong-model`.
+
+golemide@2, all 225 exercises (`bench/results-container-golemide2-glm-5.3-flash.tsv`):
+169/225, 75.1%, $0.45 — against 75.6% on the host. The host run had understated C++ by
+the two Boost exercises and overstated Go by run-to-run variance; the nine Go
+exercises that flipped to failing were re-tested in the image and every one is an
+ordinary wrong answer or compile error, none a Go-version error. Aider in the same
+image: 67.1%.
+
+Rust and Python, 64 exercises, every arm in the image
+(`bench/results-container-{golemide8,zcode}-rust-python-glm-5.3-flash.tsv`):
+
+| | golemide@8 | ZCode | golemide@2 | Aider |
+|---|---|---|---|---|
+| rust (30) | 30 | 30 | 18 | 17 |
+| python (34) | 34 | 33 | 25 | 27 |
+| **total (64)** | **64 (100%)** | **63 (98.4%)** | 43 (67.2%) | 44 (68.8%) |
+| cost | $0.23 | $1.25 | $0.13 | $0.10 |
+| median wall per exercise | 29 s | 78 s | 18 s | 18 s |
+
+ZCode runs the tests itself as often as it likes within 900 s; golemide@8 was allowed
+eight attempts and used at most five (25 exercises in one, 22 in two). At two attempts
+golemide trailed ZCode by 20 exercises; at eight it matched it, at a fifth of the
+cost and under half the wall time. The gap was chances to react, not the agent: three
+of golemide@2's misses were solved on the first attempt of the @8 run, so part of it is
+also the model's own variance, which cheap attempts let golemide resample.
+
+Why the cost differs: golemide averaged 1.6 model requests per exercise at two
+attempts; ZCode made a median of 9, each carrying about 33,000 input tokens of system
+prompt, tool schemas and history. On Cloudflare's 20 requests per minute for this
+model, ZCode at four in parallel was rate-limited on 32 of its first 33 exercises;
+golemide's 225 never were.
+
+Why golemide beats Aider at two attempts, stated with its caveat: golemide solved
+45.8% on the first attempt, Aider 20.9%. golemide reads the test files and runs them
+before its first request; Aider's benchmark deliberately withholds test files from
+the first try (`benchmark.py` adds test files to `ignore_files`). Part of that gap is
+the agent choosing to look, which is golemide's design, and part is a protocol Aider
+set for itself. ZCode reads the tests too, so the ZCode comparison is not affected.
+
+ZCode was checked for the obvious ways to be wrong: no WebFetch or WebSearch call in
+any session, no test file changed. It edited one `Cargo.toml`
+(`rust/doubly-linked-list`) to enable the exercise's `advanced` tests, which makes the
+check stricter, not weaker.
+
+One run per arm on two languages. Before this becomes a public claim: every language,
+`RUNS=3`, and the spread next to each number.

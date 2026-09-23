@@ -16,6 +16,11 @@
 #   BENCH_JOBS=4                         exercises in parallel
 #   BENCH_CHECK_ONLY=1                   prove the harness, run nothing
 #   BENCH_ONLY=pairs.tsv                 re-run only these "lang<TAB>exercise" rows
+#   BENCH_MODEL=cf:glm-5.3               model, passed as --model (default: the agent's)
+#   BENCH_STRONG_MODEL=cf:glm-5.3-flash  where the ladder escalates, passed as --strong-model
+#   BENCH_TIMEOUT=300                    verify deadline in seconds for the agent's runs
+#   BENCH_ATTEMPTS=2                     attempts per exercise (default 3)
+#   BENCH_WORK=/dir                      where logs and results.tsv go
 #
 # The reference solution lives in each exercise's .meta/ directory and is
 # deleted before the agent sees anything. Without that the benchmark
@@ -202,8 +207,24 @@ $(cat "$d/.docs/instructions.append.md")"
   task="$(printf '%s' "$task" | head -c 6000)"
 
   local log="$WORK/$lang/$ex.log"
+  # BENCH_MODEL picks the model; BENCH_TIMEOUT is the verify deadline in seconds, for
+  # the agent's own runs. The harness's re-check has its own (VERIFY_DEADLINE).
+  #
+  # BENCH_AGENT swaps in another agent, so a control arm runs under exactly this
+  # harness: the same stripped exercise, the same verify command, the same re-check.
+  # It is called as `BENCH_AGENT <task> <dir> <verify-command> <attempts>` and its
+  # output is the log; for the results row it should print, like golemide does, a
+  # `[edit]` line per attempt, the total cost as `$0.0123` on its last such line, and
+  # the wall time as `<n>s` at the end of a line.
+  if [ -n "${BENCH_AGENT:-}" ]; then
+    ( "$BENCH_AGENT" "$task" "$d" "$vc" "$ATTEMPTS" ) > "$log" 2>&1
+  else
   ( "$AGENT_ROOT/golemide" solve "$task" \
-      --root "$d" --verify "$vc" --attempts "$ATTEMPTS" ) > "$log" 2>&1
+      --root "$d" --verify "$vc" --attempts "$ATTEMPTS" \
+      ${BENCH_MODEL:+--model "$BENCH_MODEL"} \
+      ${BENCH_STRONG_MODEL:+--strong-model "$BENCH_STRONG_MODEL"} \
+      ${BENCH_TIMEOUT:+--timeout "$BENCH_TIMEOUT"} ) > "$log" 2>&1
+  fi
 
   # The agent's own verdict is not the verdict. Re-run the suite here —
   # under a deadline. An implementation that loops forever (rust/robot-name
@@ -238,7 +259,7 @@ $(cat "$d/.docs/instructions.append.md")"
   printf '%-11s %-28s %s\n' "$lang" "$ex" "$result"
 }
 export -f run_one verify_for prepare_dir count_tests counting_command bounded_verify
-export POLYGLOT WORK AGENT_ROOT ATTEMPTS JAVA_HOME
+export POLYGLOT WORK AGENT_ROOT ATTEMPTS JAVA_HOME BENCH_MODEL BENCH_STRONG_MODEL BENCH_TIMEOUT BENCH_AGENT
 
 mkdir -p "$WORK"; [ -n "${BENCH_ONLY:-}" ] || : > "$WORK/results.tsv"
 
