@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: almide/almide
-          ref: dff9a458f2e581631bb6537c856a7974036e4153
+          ref: ce7cd75538fa4eb793b6c532c7a41f908ae90dbd
           path: .ci/almide
           persist-credentials: false
       - run: rustup toolchain install 1.94.0 --profile minimal
@@ -31,7 +31,7 @@ jobs:
         id: compiler
         with:
           path: .ci/almide/target/release/almide
-          key: almide-${{ runner.os }}-dff9a458f2e581631bb6537c856a7974036e4153-rust1.94.0
+          key: almide-${{ runner.os }}-ce7cd75538fa4eb793b6c532c7a41f908ae90dbd-rust1.94.0
       - if: steps.compiler.outputs.cache-hit != 'true'
         run: cargo build --release --locked --bin almide --manifest-path .ci/almide/Cargo.toml
       - name: Tests, build and CLI smoke
