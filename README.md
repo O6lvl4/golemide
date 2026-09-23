@@ -51,7 +51,7 @@ rolled back to the version that did.
 
 ### Called by another agent
 
-[golemancer](https://github.com/O6lvl4/golemancer), a coding conversation in the
+[shemide](https://github.com/O6lvl4/shemide), a coding agent in the
 terminal, calls golemide this way for every edit and `solve`. It needs golemide 0.2.0 or
 later (`golemide --version`) and reads the same `~/.config/golemide/.env`.
 

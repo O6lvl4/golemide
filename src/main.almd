@@ -18,7 +18,7 @@ import self.solve
 import self.report
 import self.tool
 
-// Kept equal to almide.toml's version. golemancer reads it to tell whether this
+// Kept equal to almide.toml's version. shemide reads it to tell whether this
 // golemide has the tool interface (edit, --json) it calls.
 let VERSION = "0.2.0"
 
