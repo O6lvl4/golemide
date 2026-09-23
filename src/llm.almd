@@ -293,8 +293,9 @@ type Call = { pid: Int, sse: String, cfg: String, out: String, err: String, pid_
 
 // curl's stdout is `%{http_code}` with no newline; the shell appends the exit
 // status on its own line once curl has actually finished. Nothing else writes
-// here, so the presence of that second line is what "done" means — a zombie
-// child would still look alive to `is_alive`.
+// here, so the presence of that second line is what "done" means. Up to 0.62
+// a zombie child still looked alive to `is_alive`; the develop runtime reaps it
+// there (f3b4033), but the file answers the same on every version.
 fn call_result(out: String) -> (Int, Int)? = {
   let lines = string.split(out, "\n")
   if list.len(lines) < 2 then none
@@ -471,12 +472,6 @@ test "discarding a call stops the work it spawned, not only its shell" {
   env.sleep_ms(400)
   let later = string.len(fs.read_text(sink) ?? "")
   assert_eq(later, just_after)
-
-  // And the reason `is_done` reads a file instead of asking `is_alive`: the
-  // shell has been signalled and has stopped doing anything, yet it is still
-  // reported alive until something reaps it. A completion check built on this
-  // would wait forever on a request that already ended.
-  assert(process.is_alive(shell_pid))
 }
 
 test "the wall-clock cap narrows the deadline and never widens it" {
