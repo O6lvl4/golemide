@@ -1,10 +1,8 @@
 <p align="center">
-  <img src="docs/images/golemide.png" alt="Golemide, a black stone guardian with warm golden light between its rocks" width="400">
+  <img src="docs/images/banner.png" alt="golemide — Observe first. Build with evidence. A coding agent written in Almide.">
 </p>
 
-<h1 align="center">golemide</h1>
-<p align="center"><strong>Observe first. Build with evidence.</strong></p>
-<p align="center">A coding agent written in Almide.<br>Read the project. Make the edit. Run the tests.</p>
+<p align="center">Read the project. Make the edit. Run the tests.</p>
 <p align="center">
   <a href="https://github.com/O6lvl4/golemide/actions/workflows/quality.yml"><img src="https://github.com/O6lvl4/golemide/actions/workflows/quality.yml/badge.svg" alt="Quality CI"></a>
   · <a href="README_ja.md">日本語</a>
