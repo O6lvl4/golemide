@@ -28,8 +28,9 @@ almide build
 ```
 
 `observe` inspects the project and runs its verification command without asking a
-model. To make edits, set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in your
-environment or the target project's `.env`, then give golemide a task:
+model. To make edits, set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in
+`~/.config/golemide/.env`, the target project's `.env`, or the environment, then give
+golemide a task:
 
 ```sh
 ./golemide solve "fix clamp for out-of-range values" \
@@ -49,6 +50,10 @@ rolled back to the version that did.
 ```
 
 ### Called by another agent
+
+[golemancer](https://github.com/O6lvl4/golemancer), a coding conversation in the
+terminal, calls golemide this way for every edit and `solve`. It needs golemide 0.2.0 or
+later (`golemide --version`) and reads the same `~/.config/golemide/.env`.
 
 `solve --json` and `polish --json` print one JSON object on stdout in place of the report.
 It carries the status, exit code, cost, each attempt, the diff of the whole run and the

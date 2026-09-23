@@ -29,8 +29,8 @@ almide build
 ```
 
 `observe` はモデルを呼ばずにプロジェクトを調べ、検証コマンドを実行します。
-編集するには、環境変数か対象プロジェクトの `.env` に `CLOUDFLARE_ACCOUNT_ID` と
-`CLOUDFLARE_API_TOKEN` を設定し、タスクを渡します。
+編集するには、`~/.config/golemide/.env`、対象プロジェクトの `.env`、または環境変数に
+`CLOUDFLARE_ACCOUNT_ID` と `CLOUDFLARE_API_TOKEN` を設定し、タスクを渡します。
 
 ```sh
 ./golemide solve "clamp が範囲外の値で失敗する問題を直す" \
@@ -48,6 +48,10 @@ almide build
 ```
 
 ### 他のエージェントから呼ぶ
+
+ターミナルの対話型コーディングエージェント [golemancer](https://github.com/O6lvl4/golemancer) は、
+編集と `solve` のたびにこの形で golemide を呼びます。golemide 0.2.0 以降（`golemide --version`）が必要で、
+認証情報は同じ `~/.config/golemide/.env` を読みます。
 
 `solve --json` と `polish --json` は、報告の代わりに JSON オブジェクトを 1 つだけ標準出力に出します。
 状態、終了コード、費用、各試行、実行全体の差分、最後の検証出力の末尾が入ります。進捗は標準エラーのままです。

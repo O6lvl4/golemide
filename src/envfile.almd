@@ -25,6 +25,15 @@ fn parse_env(text: String) -> List[(String, String)] = {
   out
 }
 
+// Where credentials are looked for, in order: the project, the directory the command
+// was run from, and one place shared by golemide and golemancer, so one key serves
+// both: $XDG_CONFIG_HOME/golemide/.env, or ~/.config/golemide/.env.
+effect fn dirs_for(root: String) -> List[String] = {
+  let config = env.get("XDG_CONFIG_HOME") ?? ""
+  let base = if config == "" then (env.get("HOME") ?? "") + "/.config" else config
+  [root, env.cwd() ?? ".", base + "/golemide"]
+}
+
 effect fn load(dirs: List[String]) -> List[String] = {
   var loaded: List[String] = []
   var seen: List[String] = []

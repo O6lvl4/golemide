@@ -5,6 +5,7 @@
 //   golemide edit         [--root DIR] [--create]      one edit on stdin, JSON out
 //   golemide observe      [--root DIR] [--verify CMD]
 //   golemide llm-test
+//   golemide --version
 
 import env
 import io
@@ -17,6 +18,10 @@ import self.solve
 import self.report
 import self.tool
 
+// Kept equal to almide.toml's version. golemancer reads it to tell whether this
+// golemide has the tool interface (edit, --json) it calls.
+let VERSION = "0.2.0"
+
 let USAGE = """
 golemide — observe, then act
 
@@ -27,6 +32,7 @@ golemide — observe, then act
                         stdin: {"path": P, "replacements": [{"old": O, "new": N}]} or {"path": P, "source": S}
   golemide observe       [--root DIR] [--verify CMD]
   golemide llm-test
+  golemide --version
 
 Options
   --root DIR      project root (default: cwd)
@@ -72,8 +78,7 @@ fn parse_args(argv: List[String]) -> Args = {
 }
 
 effect fn load_env(root: String) -> Unit = {
-  let home = env.get("HOME") ?? ""
-  let _ = envfile.load([root, env.cwd() ?? ".", home + "/workspace/github.com/O6lvl4/_agent", home + "/workspace/github.com/Aid-On/famulus5", home + "/workspace/github.com/Aid-On/famulus4"])!
+  let _ = envfile.load(envfile.dirs_for(root)!)!
   ()
 }
 
@@ -216,7 +221,8 @@ effect fn finish(r: Result[Int, String]) -> Unit = match r {
 
 effect fn main() -> Unit = {
   let a = parse_args(env.args())
-  if a.cmd == "" or a.cmd == "help" or map.contains(a.flags, "help") then { println(USAGE); process.exit(if a.cmd == "" then 1 else 0) }
+  if a.cmd == "version" or a.cmd == "--version" then { println("golemide " + VERSION); process.exit(0) }
+  else if a.cmd == "" or a.cmd == "help" or map.contains(a.flags, "help") then { println(USAGE); process.exit(if a.cmd == "" then 1 else 0) }
   else if a.cmd == "llm-test" then finish(result.map(llm_test(a), (_) => 0))!
   else if a.cmd == "observe" then finish(result.map(run_observe(a), (_) => 0))!
   else if a.cmd == "solve" then finish(run_solve(a))!
