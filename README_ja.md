@@ -49,7 +49,7 @@ almide build
 
 ### 他のエージェントから呼ぶ
 
-ターミナルのコーディングエージェント [shemide](https://github.com/O6lvl4/shemide) は、
+ターミナルのコーディングエージェント [comide](https://github.com/O6lvl4/comide) は、
 編集と `solve` のたびにこの形で golemide を呼びます。golemide 0.2.0 以降（`golemide --version`）が必要で、
 認証情報は同じ `~/.config/golemide/.env` を読みます。
 
