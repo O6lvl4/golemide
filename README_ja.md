@@ -47,6 +47,24 @@ almide build
 ./golemide polish --root ../project --verify "cargo test"
 ```
 
+### 他のエージェントから呼ぶ
+
+`solve --json` と `polish --json` は、報告の代わりに JSON オブジェクトを 1 つだけ標準出力に出します。
+状態、終了コード、費用、各試行、実行全体の差分、最後の検証出力の末尾が入ります。進捗は標準エラーのままです。
+検証コマンドが無い場合、`solve` は 1 回書いたところで終了コード 4 で止まります。
+2 回目を確かめる手段が無いからです。
+
+`golemide edit` は、呼び出し側が既に決めた編集を 1 つ適用します。
+`solve` がモデルに求める編集と同じく、パス、置換、構文の検査を通します。
+
+```sh
+echo '{"path": "src/lib.rs", "replacements": [{"old": "a + b", "new": "a - b"}]}' \
+  | ./golemide edit --root ../project
+# {"ok":true,"path":"src/lib.rs","bytes":812,"checked_by":"gramide","matched":[],"diff":"…"}
+```
+
+書き込めたら 0、理由付きで拒否したら 1、入力が編集になっていなければ 2 で終わります。
+
 ## 観察から、検証済みの編集へ
 
 1. **観察する。** プロジェクトとファイル一覧を調べ、利用できればリポジトリ地図を作り、
@@ -139,6 +157,9 @@ CI ではコンパイラと Rust のバージョンを固定しています。[�
 | `src/main.almd` | コマンド、オプション、認証情報 |
 | `src/observe.almd` | プロジェクトの観察と検証コマンド |
 | `src/solve.almd` | ファイル選択と編集・検証ループ |
+| `src/replace.almd` | 置換が名指した文字列の探索。完全一致か、決まった段階の緩めた一致で |
+| `src/report.almd` | 最終報告。人が読む形と JSON |
+| `src/tool.almd` | `golemide edit`。呼び出し側が決めた編集を、書き込み前の検査に通す |
 | `src/gate.almd` | 書き込み前の構文チェック |
 | `src/reference.almd` | モデルに見せる言語リファレンス |
 | `src/explain.almd` | コンパイラ診断の説明 |

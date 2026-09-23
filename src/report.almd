@@ -1,0 +1,148 @@
+// What a run says when it ends: the lines a person reads, and the same facts as one
+// JSON object for a program that calls golemide as a tool.
+//
+// Both are built from one Outcome so they cannot disagree. `--json` swaps the human
+// report on stdout for the object; progress notes stay on stderr either way, so a
+// caller that reads stdout gets exactly one JSON document and nothing else.
+
+import json
+import value
+import self.solve
+import self.observe
+
+// How much of the last verify output travels in the JSON. Test runners put the failure
+// at the end, and a caller deciding what to do next needs that part, not the build log.
+let OUTPUT_TAIL_LINES = 40
+
+fn usd(x: Float) -> String = {
+  let micros = float.to_int(x * 1000000.0 + 0.5)
+  "$" + int.to_string(micros / 1000000) + "." + string.pad_start(int.to_string(micros % 1000000), 6, "0")
+}
+
+// The cost as JSON, at the precision `usd` prints. Token prices reach the sum through
+// single-precision arithmetic, and 0.000156 arrived as 0.00015620000249147415.
+fn usd_value(x: Float) -> Value = value.float(float.from_int(float.to_int(x * 1000000.0 + 0.5)) / 1000000.0)
+
+// exit 0 solved, 1 not solved, 2 setup error, 3 nothing to do or the verify command
+// broke before anything ran, 4 edits written with nothing to check them.
+fn exit_code(r: solve.Outcome) -> Int = if r.ok then 0 else if r.unverified then 4 else 1
+
+fn status_of(r: solve.Outcome) -> String =
+  if r.ok then "solved" else if r.harness_broken != "" then "harness_broken" else if r.unverified then "applied_unverified" else "not_solved"
+
+// A rolled-back polish leaves the tree exactly as it found it, which is not the same
+// news as a repair that landed.
+fn headline(r: solve.Outcome, polish_only: Bool) -> String = match r.polish_kept {
+  some(kept) => if polish_only then (if kept then "POLISHED" else "UNCHANGED — the simpler version did not pass")
+                else (if r.ok then (if kept then "SOLVED, and the simpler version kept" else "SOLVED, the polish rolled back") else "NOT SOLVED"),
+  none => if r.ok then "SOLVED" else if r.unverified then "APPLIED, NOT VERIFIED" else "NOT SOLVED",
+}
+
+fn failure_reason(r: solve.Outcome) -> String = match list.last(r.attempts) {
+  some(last) => if last.apply_error != "" then last.apply_error else match last.verify { some(v) => "verify exited " + int.to_string(v.code), none => "no attempt completed" },
+  none => "no attempt completed",
+}
+
+fn human(r: solve.Outcome, polish_only: Bool) -> String = {
+  var lines = ["\n" + headline(r, polish_only) + " in " + int.to_string(list.len(r.attempts)) + " attempt(s), " + usd(r.cost_usd) + ", " + int.to_string(r.wall_ms / 1000) + "s"]
+  if not list.is_empty(r.changed) then list.push(lines, "changed: " + string.join(r.changed, ", ")) else ()
+  for w in r.warnings { list.push(lines, "WARNING: " + w) }
+  if r.harness_broken != "" then list.push(lines, "the verify command stopped working mid-run: " + r.harness_broken + "\nthe edits on disk were never actually checked.")
+  else if r.unverified then list.push(lines, "nothing checked these edits: give --verify, or add a marker file golemide can infer a test command from.")
+  else if not r.ok then list.push(lines, "reason: " + failure_reason(r))
+  else ()
+  string.join(lines, "\n")
+}
+
+fn strs(xs: List[String]) -> Value = value.array(list.map(xs, (s) => value.str(s)))
+
+fn verify_value(v: observe.CommandResult, with_output: Bool) -> Value = {
+  var fields = [("exit", value.int(v.code)), ("timed_out", value.bool(v.timed_out)), ("ms", value.int(v.duration_ms))]
+  if with_output then list.push(fields, ("output_tail", value.str(observe.tail(string.trim(v.stdout + "\n" + v.stderr), OUTPUT_TAIL_LINES)))) else ()
+  value.object(fields)
+}
+
+fn attempt_value(t: solve.Attempt) -> Value = {
+  var fields = [
+    ("n", value.int(t.n)),
+    ("read", strs(t.read)),
+    ("edited", strs(list.map(t.edits, (e) => e.path))),
+    ("rejected", value.array(list.map(t.rejected, (x) => value.object([("path", value.str(x.path)), ("why", value.str(x.why))])))),
+    ("ok", value.bool(t.ok)),
+    ("cost_usd", usd_value(t.cost_usd)),
+    ("ms", value.int(t.ms)),
+  ]
+  if t.explanation != "" then list.push(fields, ("explanation", value.str(t.explanation))) else ()
+  if t.apply_error != "" then list.push(fields, ("apply_error", value.str(t.apply_error))) else ()
+  match t.verify { some(v) => list.push(fields, ("verify", verify_value(v, false))), none => () }
+  value.object(fields)
+}
+
+fn outcome_json(r: solve.Outcome, verify_command: String) -> String = {
+  var fields = [
+    ("status", value.str(status_of(r))),
+    ("ok", value.bool(r.ok)),
+    ("exit", value.int(exit_code(r))),
+    ("attempts", value.int(list.len(r.attempts))),
+    ("changed", strs(r.changed)),
+    ("cost_usd", usd_value(r.cost_usd)),
+    ("wall_ms", value.int(r.wall_ms)),
+    ("verify_command", value.str(verify_command)),
+    ("warnings", strs(r.warnings)),
+    ("attempt_log", value.array(list.map(r.attempts, attempt_value))),
+  ]
+  match r.polish_kept { some(k) => list.push(fields, ("polish_kept", value.bool(k))), none => () }
+  if r.harness_broken != "" then list.push(fields, ("harness_broken", value.str(r.harness_broken))) else ()
+  if r.diff != "" then list.push(fields, ("diff", value.str(r.diff))) else ()
+  match option.flat_map(list.last(r.attempts), (t) => t.verify) { some(v) => list.push(fields, ("last_verify", verify_value(v, true))), none => () }
+  json.stringify(value.object(fields))
+}
+
+// For a run that ended before any attempt: nothing to read, the verify command broke,
+// it already passes. Same keys as `outcome_json`, so a caller reads one shape.
+fn status_json(status: String, exit: Int, message: String, verify_command: String) -> String =
+  json.stringify(value.object([
+    ("status", value.str(status)), ("ok", value.bool(exit == 0)), ("exit", value.int(exit)),
+    ("attempts", value.int(0)), ("changed", strs([])), ("cost_usd", value.float(0.0)),
+    ("verify_command", value.str(verify_command)), ("message", value.str(message)),
+  ]))
+
+fn outcome_for_test(solved: Bool, unverified: Bool, broken: String) -> solve.Outcome =
+  solve.Outcome { ok: solved, attempts: [], changed: [], cost_usd: 0.0, wall_ms: 0, warnings: [], harness_broken: broken, polish_kept: none, unverified: unverified, diff: "" }
+
+test "the exit status and the status name come from the same outcome" {
+  assert_eq(exit_code(outcome_for_test(false, false, "")), 1)
+  assert_eq(status_of(outcome_for_test(false, false, "")), "not_solved")
+  assert_eq(exit_code(outcome_for_test(true, false, "")), 0)
+  assert_eq(status_of(outcome_for_test(true, false, "")), "solved")
+  assert_eq(exit_code(outcome_for_test(false, true, "")), 4)
+  assert_eq(status_of(outcome_for_test(false, true, "")), "applied_unverified")
+  // A verify command that broke mid-run is still exit 1, as it always was; the status
+  // is where the difference is said.
+  assert_eq(exit_code(outcome_for_test(false, false, "the command timed out")), 1)
+  assert_eq(status_of(outcome_for_test(false, false, "the command timed out")), "harness_broken")
+  assert(string.contains(human(outcome_for_test(false, true, ""), false), "APPLIED, NOT VERIFIED"))
+}
+
+test "the JSON report carries each attempt and the tail of the last verify" {
+  let v = observe.CommandResult { command: "pytest -q", code: 1, stdout: "collected 3\nFAILED test_a - assert 1 == 2", stderr: "", timed_out: false, duration_ms: 812, spawn_error: "" }
+  let a1 = solve.Attempt { n: 1, read: ["a.py", "test_a.py"], edits: [solve.Edit { path: "a.py", source: "x" }], rejected: [solve.Rejected { path: "b.py", why: "not among the files it was shown completely" }],
+    apply_error: "", verify: some(v), ok: false, cost_usd: 0.0012, ms: 4000, explanation: "return the sum" }
+  let r = solve.Outcome { ok: false, attempts: [a1], changed: ["a.py"], cost_usd: 0.0012, wall_ms: 5000, warnings: [], harness_broken: "", polish_kept: none, unverified: false, diff: "" }
+  let doc = json.parse(outcome_json(r, "pytest -q")) ?? value.object([])
+  assert_eq(json.get_string(doc, "status"), some("not_solved"))
+  assert_eq(json.get_int(doc, "exit"), some(1))
+  assert_eq(json.get_string(doc, "verify_command"), some("pytest -q"))
+  assert(string.contains(outcome_json(solve.Outcome { ok: false, attempts: [], changed: [], cost_usd: 0.00015620000249147415, wall_ms: 0, warnings: [], harness_broken: "", polish_kept: none, unverified: false, diff: "" }, ""), "\"cost_usd\":0.000156,"))
+  let log = json.get_array(doc, "attempt_log") ?? []
+  assert_eq(list.len(log), 1)
+  let first = list.first(log) ?? value.object([])
+  assert_eq(json.get_string(first, "explanation"), some("return the sum"))
+  assert_eq(list.len(json.get_array(first, "rejected") ?? []), 1)
+  let last = value.field(doc, "last_verify") ?? value.object([])
+  assert(string.contains(json.get_string(last, "output_tail") ?? "", "FAILED test_a"))
+
+  let early = json.parse(status_json("already_passes", 0, "nothing to do", "cargo test")) ?? value.object([])
+  assert_eq(json.get_string(early, "status"), some("already_passes"))
+  assert_eq(json.get_int(early, "attempts"), some(0))
+}

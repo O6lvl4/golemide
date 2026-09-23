@@ -1,0 +1,127 @@
+// `golemide edit`: one edit, applied the way `solve` applies the model's, for a caller
+// that has already decided the change -- a conversational agent that read the file and
+// wants it changed without a repair loop around it.
+//
+// It takes the object the model answers with in `solve`, a path and either `source` or
+// `replacements`, on stdin, and prints one JSON object on stdout:
+//
+//   {"path": "src/lib.rs", "replacements": [{"old": "…", "new": "…"}]}
+//   {"ok": true, "path": "src/lib.rs", "bytes": 812, "checked_by": "gramide",
+//    "matched": ["replacement 1 matched ignoring a uniform indentation change"], "diff": "…"}
+//
+// Every check `solve` makes before a write is made here too, in the same order: the
+// path stays inside the root, the file exists unless creation was asked for, a
+// replacement is found on the ladder in `replace` or refused, a whole-file source that
+// is a fragment of the file is refused, and the syntax gate decides whether the bytes
+// reach disk. What is not here is the model and the verify command. Whether the change
+// is right is the caller's to establish; this only guarantees it landed cleanly.
+
+import fs
+import json
+import value
+import self.solve
+import self.replace
+import self.gate
+
+// `code` is the exit status: 0 written, 1 refused, 2 the input was not an edit.
+type EditResult = { code: Int, path: String, error: String, bytes: Int, checked_by: String, matched: List[String], diff: String }
+
+fn refused(code: Int, path: String, why: String) -> EditResult =
+  EditResult { code: code, path: path, error: why, bytes: 0, checked_by: "", matched: [], diff: "" }
+
+effect fn apply_request(root: String, input: String, allow_create: Bool) -> EditResult =
+  match json.parse(input) {
+    err(e) => refused(2, "", "the input is not JSON: " + e),
+    ok(v) => match solve.edit_of(v) {
+      none => refused(2, json.get_string(v, "path") ?? "", "an edit is a `path` and either `source` or a non-empty `replacements` list"),
+      some(e0) => apply_edit(root, e0, solve.replacements_of(v), allow_create)!,
+    },
+  }
+
+effect fn apply_edit(root: String, e0: solve.Edit, reps: List[replace.Replacement], allow_create: Bool) -> EditResult = {
+  let p = solve.resolve_edit_path(e0.path, root, [])
+  let full = root + "/" + p
+  if string.starts_with(p, "/") or string.contains(p, "..") then refused(1, p, "outside the project root")
+  else if not fs.exists(full) and not allow_create then refused(1, p, "does not exist (pass --create to make a new file)")
+  else {
+    let before = fs.read_text(full) ?? ""
+    let (source, matched, rep_error) = if list.is_empty(reps) then (solve.unwrap_source(e0.source), [], "")
+      else match replace.apply(before, reps) {
+        ok(a) => (a.0, a.1, ""),
+        err(why) => ("", [], why),
+      }
+    let degenerate = if rep_error != "" then "" else solve.degenerate_write(root, p, source)!
+    let was = solve.mtime_of(full)!
+    if rep_error != "" then refused(1, p, rep_error)
+    else if degenerate != "" then refused(1, p, degenerate)
+    else match gate.write_checked(full, source, true) {
+      err(why) => refused(1, p, "refused by the syntax gate: " + why),
+      ok(w) => {
+        solve.bump_mtimes(root, [(p, was)])!
+        EditResult { code: 0, path: p, error: "", bytes: w.bytes, checked_by: w.checked, matched: matched, diff: solve.unified_diff(before, source) }
+      },
+    }
+  }
+}
+
+fn result_json(r: EditResult) -> String = {
+  var fields = [("ok", value.bool(r.code == 0)), ("path", value.str(r.path))]
+  if r.code == 0 then {
+    list.push(fields, ("bytes", value.int(r.bytes)))
+    list.push(fields, ("checked_by", value.str(r.checked_by)))
+    list.push(fields, ("matched", value.array(list.map(r.matched, (m) => value.str(m)))))
+    list.push(fields, ("diff", value.str(r.diff)))
+  } else list.push(fields, ("error", value.str(r.error)))
+  json.stringify(value.object(fields))
+}
+
+// The root a caller's absolute paths are compared against. A caller that runs
+// `golemide edit --root .` and names /home/me/proj/src/a.py means src/a.py; compared with
+// the literal ".", that path would be refused as outside the root.
+fn absolute_root(root: String, cwd: String) -> String = {
+  let r = string.strip_suffix(root, "/") ?? root
+  if string.starts_with(root, "/") then (if r == "" then "/" else r)
+  else if r == "" or r == "." then cwd
+  else cwd + "/" + (string.strip_prefix(r, "./") ?? r)
+}
+
+test "a relative root is resolved against the working directory" {
+  assert_eq(absolute_root(".", "/w/proj"), "/w/proj")
+  assert_eq(absolute_root("./sub/", "/w/proj"), "/w/proj/sub")
+  assert_eq(absolute_root("/abs/root/", "/w/proj"), "/abs/root")
+}
+
+// The request as a JSON string, so the tests read like the calls a caller makes.
+fn edit_request(path: String, old: String, new: String) -> String =
+  json.stringify(value.object([("path", value.str(path)), ("replacements", value.array([value.object([("old", value.str(old)), ("new", value.str(new))])]))]))
+
+test "an edit lands through the same checks solve uses, and says why when it does not" {
+  let root = fs.create_temp_dir("golemide-edit")!
+  fs.write(root + "/notes.txt", "fn a():\n    x = 1\n    y = 2\n")!
+
+  // A replacement whose indentation the caller lost is still found, and re-indented.
+  let r = apply_request(root, edit_request("notes.txt", "x = 1\ny = 2", "x = 1\ny = 3"), false)!
+  assert_eq(r.code, 0)
+  assert_eq(fs.read_text(root + "/notes.txt") ?? "", "fn a():\n    x = 1\n    y = 3\n")
+  // The diff is the one `solve` shows the model: a marker, a space, then the line.
+  assert(string.contains(r.diff, "- " + "    y = 2"))
+  assert(string.contains(r.diff, "+ " + "    y = 3"))
+  assert_eq(r.matched, ["replacement 1 matched ignoring a uniform indentation change"])
+  assert(string.contains(result_json(r), "\"ok\":true"))
+
+  // Refusals carry the reason and leave the file alone.
+  let untouched = fs.read_text(root + "/notes.txt") ?? ""
+  assert(string.contains(apply_request(root, edit_request("notes.txt", "omega", "x"), false)!.error, "could not find this text"))
+  assert_eq(apply_request(root, edit_request("../outside.txt", "a", "b"), false)!.error, "outside the project root")
+  assert(string.contains(apply_request(root, edit_request("missing.txt", "a", "b"), false)!.error, "does not exist"))
+  assert_eq(fs.read_text(root + "/notes.txt") ?? "", untouched)
+
+  // Input that is not an edit is a different failure from an edit that was refused.
+  assert_eq(apply_request(root, "not json", false)!.code, 2)
+  assert_eq(apply_request(root, "{\"path\":\"notes.txt\"}", false)!.code, 2)
+
+  // A new file needs --create.
+  let created = apply_request(root, "{\"path\":\"new.txt\",\"source\":\"hello\\n\"}", true)!
+  assert_eq(created.code, 0)
+  assert_eq(fs.read_text(root + "/new.txt") ?? "", "hello\n")
+}

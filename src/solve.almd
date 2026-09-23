@@ -16,6 +16,7 @@ import self.reference
 import self.observe
 import self.explain
 import self.gate
+import self.replace
 
 type Edit = { path: String, source: String }
 type Rejected = { path: String, why: String }
@@ -24,8 +25,19 @@ type Attempt = { n: Int, read: List[String], edits: List[Edit], rejected: List[R
 // `polish_kept` is none when no polish ran, and otherwise says whether the
 // simpler version survived its verify. Without it a rolled-back polish
 // reports the same headline as one that was kept.
-type Outcome = { ok: Bool, attempts: List[Attempt], changed: List[String], cost_usd: Float, wall_ms: Int, warnings: List[String], harness_broken: String, polish_kept: Bool? }
-type Options = { max_attempts: Int, max_files: Int, model: String, allow_create: Bool, quiet: Bool, polish: Int, polish_only: Bool, explore: Int }
+// `unverified` means edits were written and nothing could check them: there was no
+// verify command, given or inferred. It is its own state, not a failure and not a
+// success, because the caller is the only one who can find out which it was.
+// `diff` is what the run did, each written file from before its first write to now.
+// The per-attempt diffs say what each attempt changed from the last; a caller that
+// has to explain the result needs the sum.
+type Outcome = { ok: Bool, attempts: List[Attempt], changed: List[String], cost_usd: Float, wall_ms: Int, warnings: List[String], harness_broken: String, polish_kept: Bool?, unverified: Bool, diff: String }
+// `verify_timeout_ms` is the same number the baseline observation ran under. It used to be
+// a fixed 120 s here while `--timeout` changed only the baseline, so a slow test suite
+// passed its first run and timed out on every attempt after it.
+// `strong_model` is where the ladder's last rung goes. A benchmark that compares agents
+// on one model sets it to that model, so more attempts cannot also mean a bigger model.
+type Options = { max_attempts: Int, max_files: Int, model: String, allow_create: Bool, quiet: Bool, polish: Int, polish_only: Bool, explore: Int, verify_timeout_ms: Int, strong_model: String }
 
 // Commands the model asks to run before it edits, so it can look at things `observe` did
 // not think to collect.
@@ -173,17 +185,15 @@ effect fn repair_prompt(obs: observe.Observation, rejected: List[Rejected], quie
 // rest may not. Nothing here touches the disk: a path outside the root, a file
 // that was never shown, a creation that was not allowed and a degenerate write
 // are all refused before the gate ever sees them.
-// A replacement the model asked for: the exact text to find, and what to put there.
-type Replacement = { old: String, new: String }
-
-fn replacements_of(v: Value) -> List[Replacement] =
+fn replacements_of(v: Value) -> List[replace.Replacement] =
   list.filter_map(json.get_array(v, "replacements") ?? [], (r) =>
     match (json.get_string(r, "old"), json.get_string(r, "new")) {
-      (some(o), some(n)) => some(Replacement { old: o, new: n }),
+      (some(o), some(n)) => some(replace.Replacement { old: o, new: n }),
       _ => none,
     })
 
-// Apply replacements to a file's current text, or say exactly why not.
+// Replacements are applied by `replace.apply`, which finds the text the model named
+// even when it was not copied exactly. What follows is why the replacement form exists.
 //
 // Why this exists, stated at the size it actually measures. `bench/failures.py` over 280
 // exercise-runs: 13% of failures are the harness discarding the answer as a FRAGMENT --
@@ -219,29 +229,30 @@ fn replacements_of(v: Value) -> List[Replacement] =
 // edit the wrong line. Not found at all is usually the model quoting from memory instead
 // of from the text it was shown. Both are refused by name, and the reason travels into
 // the retry history, so the next attempt is told what was wrong rather than just "failed".
-//
-// Replacements are applied in order, each against the result of the last, so a later one
-// may legitimately target text an earlier one introduced.
-fn apply_replacements(current: String, reps: List[Replacement]) -> Result[String, String] = {
-  var text = current
-  var failure = ""
-  for r in reps {
-    if failure != "" then ()
-    else if r.old == "" then { failure = "a replacement had an empty `old`; it must be the exact text to find" }
-    else {
-      match string.index_of(text, r.old) {
-        none => { failure = "could not find this text in the file, so nothing was changed — quote it exactly as the file shows it, whitespace included: \"" + string.take(r.old, 120) + "\"" },
-        some(i) => {
-          let rest = string.drop(text, i + string.len(r.old))
-          if option.is_some(string.index_of(rest, r.old)) then {
-            failure = "this text appears more than once, so it does not say which one to change — include enough surrounding lines to make it unique: \"" + string.take(r.old, 120) + "\""
-          } else { text = string.take(text, i) + r.new + rest }
-        },
-      }
-    }
+
+// A shown file the refused path was probably meant to name: within three edits of it,
+// on the whole path or on the file name. Offered in the refusal so the repair round has
+// a name to use instead of a category of mistake to avoid. Levenshtein 3 is ZCode's
+// threshold for the same suggestion; nothing here was measured to choose it.
+let NEAREST_PATH_EDITS = 3
+
+fn base_name(p: String) -> String = match string.last_index_of(p, "/") { some(i) => string.drop(p, i + 1), none => p }
+
+fn nearest_shown(p: String, read: List[String]) -> String? = {
+  let scored = list.map(read, (f) => (int.min(replace.levenshtein(p, f), replace.levenshtein(base_name(p), base_name(f))), f))
+  let close = list.filter(scored, (s) => s.0 <= NEAREST_PATH_EDITS)
+  match list.min(list.map(close, (s) => s.0)) {
+    none => none,
+    some(best) => {
+      let at_best = list.filter(close, (s) => s.0 == best)
+      // Two files equally close is no suggestion: naming one would be a guess.
+      if list.len(at_best) == 1 then option.map(list.first(at_best), (s) => s.1) else none
+    },
   }
-  if failure != "" then err(failure) else ok(text)
 }
+
+fn did_you_mean(p: String, read: List[String]) -> String =
+  match nearest_shown(p, read) { some(f) => " — did you mean `" + f + "`?", none => "" }
 
 effect fn collect_edits(obs: observe.Observation, answer: Value, read: List[String], allow_create: Bool, quiet: Bool, into: List[Edit]) -> Result[Batch, String] = {
   var edits = into
@@ -258,19 +269,19 @@ effect fn collect_edits(obs: observe.Observation, answer: Value, read: List[Stri
         // point: the second edit format adds a way to SAY the change, not a second path
         // through the checks that decide whether it is allowed.
         let reps = replacements_of(v)
-        let (source, rep_error) = if list.is_empty(reps) then (unwrap_source(e0.source), "")
-          else match apply_replacements(fs.read_text(obs.root + "/" + p) ?? "", reps) {
-            ok(s) => (s, ""),
-            err(e) => ("", e),
+        let (source, loosened, rep_error) = if list.is_empty(reps) then (unwrap_source(e0.source), [], "")
+          else match replace.apply(fs.read_text(obs.root + "/" + p) ?? "", reps) {
+            ok(a) => (a.0, a.1, ""),
+            err(e) => ("", [], e),
           }
         if rep_error != "" then {
           list.push(rejected, Rejected { path: p, why: rep_error })
           note(quiet, "rejected " + p + ": " + rep_error)!
         } else {
-        if not list.is_empty(reps) then note(quiet, "applied " + int.to_string(list.len(reps)) + " replacement(s) to " + p)! else ()
+        if not list.is_empty(reps) then note(quiet, "applied " + int.to_string(list.len(reps)) + " replacement(s) to " + p + (if list.is_empty(loosened) then "" else " (" + string.join(loosened, "; ") + ")"))! else ()
         let on_disk = fs.exists(obs.root + "/" + p)
-        if not list.contains(read, p) and on_disk then { list.push(rejected, Rejected { path: p, why: "not among the files it was shown completely" }); note(quiet, "rejected " + p + ": not among the files it was shown completely")! }
-        else if not on_disk and not allow_create then { list.push(rejected, Rejected { path: p, why: "does not exist (creation not enabled)" }); note(quiet, "rejected " + p + ": does not exist (creation not enabled)")! }
+        if not list.contains(read, p) and on_disk then { list.push(rejected, Rejected { path: p, why: "not among the files it was shown completely" + did_you_mean(p, read) }); note(quiet, "rejected " + p + ": not among the files it was shown completely")! }
+        else if not on_disk and not allow_create then { list.push(rejected, Rejected { path: p, why: "does not exist (creation not enabled)" + did_you_mean(p, read) }); note(quiet, "rejected " + p + ": does not exist (creation not enabled)")! }
         else if string.starts_with(p, "/") or string.contains(p, "..") then list.push(rejected, Rejected { path: p, why: "outside the project root" })
         else {
           let degenerate = degenerate_write(obs.root, p, source)!
@@ -299,11 +310,13 @@ effect fn apply_edits(root: String, edits: List[Edit], quiet: Bool) -> Result[Ap
   var applied: List[Edit] = []
   var rejected: List[Rejected] = []
   var diffs: List[String] = []
+  var stamps: List[(String, Int)] = []
   for e in edits {
     let full = root + "/" + e.path
     let before = fs.read_text(full) ?? ""
+    let was = mtime_of(full)!
     match gate.write_checked(full, e.source, true) {
-      ok(_) => { list.push(applied, e); list.push(diffs, "--- " + e.path + " ---\n" + unified_diff(before, e.source)) },
+      ok(_) => { list.push(applied, e); list.push(stamps, (e.path, was)); list.push(diffs, "--- " + e.path + " ---\n" + unified_diff(before, e.source)) },
       err(why) => {
         list.push(rejected, Rejected { path: e.path, why: "refused by the syntax gate: " + why + "; the file begins \"" + first_line(e.source) + "\"" })
         note(quiet, "apply rejected " + e.path + ": " + why)!
@@ -311,7 +324,7 @@ effect fn apply_edits(root: String, edits: List[Edit], quiet: Bool) -> Result[Ap
     }
   }
   if not list.is_empty(applied) then {
-    bump_mtimes(root, list.map(applied, (e) => e.path))!
+    bump_mtimes(root, stamps)!
     if not quiet then { for e in applied { eprintln("  wrote " + e.path + " (" + int.to_string(string.len(e.source)) + " bytes)") } } else ()
   } else ()
   ok(Applied { applied: applied, rejected: rejected, diffs: diffs })
@@ -723,14 +736,47 @@ fn unified_diff(before: String, after: String) -> String = {
 fn failure_key(why: String) -> String =
   string.take(string.trim(regex.replace("\\s+", regex.replace("\\d+(\\.\\d+)?", regex.replace("0x[0-9a-fA-F]+", why, "#"), "#"), " ")), 600)
 
-// Force each written file's mtime into a later whole second, so a cache
-// keyed on (mtime seconds, size) — Python's .pyc, and others — cannot
-// serve a stale compile of a same-size rewrite.
-effect fn bump_mtimes(root: String, paths: List[String]) -> Unit = {
-  if list.is_empty(paths) then () else {
-    env.sleep_ms(1100 - (env.millis() % 1000))
-    for p in paths { let _ = observe.run("touch " + observe.shell_quote(p), root, 5000)!; () }
+// Force a written file's mtime into a later whole second, so a cache keyed on
+// (mtime seconds, size) — Python's .pyc, and others — cannot serve a stale compile of
+// a same-size rewrite. That can only happen when the write landed in the same second
+// as the version it replaced, so only those files wait. `before` is each path with its
+// mtime in seconds before the write, -1 for a file that did not exist.
+//
+// Every write used to wait for the next second. Measured 2026-09-23: that was 0.9 s of
+// each `golemide edit`, whatever the file's size, where the edit itself took 50 ms.
+effect fn bump_mtimes(root: String, before: List[(String, Int)]) -> Unit = {
+  var same: List[String] = []
+  for (p, was) in before {
+    if was >= 0 and (fs.modified_at(root + "/" + p) ?? -1) == was then list.push(same, p) else ()
   }
+  if list.is_empty(same) then () else {
+    env.sleep_ms(1100 - (env.millis() % 1000))
+    for p in same { let _ = observe.run("touch " + observe.shell_quote(p), root, 5000)!; () }
+  }
+}
+
+effect fn mtime_of(path: String) -> Int = fs.modified_at(path) ?? -1
+
+// Each file as it was before this run first wrote it; "" for one that did not exist.
+effect fn remember_originals(root: String, originals: List[(String, String)], edits: List[Edit]) -> List[(String, String)] = {
+  var out = originals
+  for e in edits {
+    if list.any(out, (o) => o.0 == e.path) then ()
+    else list.push(out, (e.path, fs.read_text(root + "/" + e.path) ?? ""))
+  }
+  out
+}
+
+// What the run did, from before its first write to now. Measured 2026-09-23: emet,
+// handed only `changed: ["lru.go"]` and the fixed file, explained the fix with a bug
+// the original never had.
+effect fn run_diff(root: String, originals: List[(String, String)]) -> String = {
+  var parts: List[String] = []
+  for (p, was) in originals {
+    let now = fs.read_text(root + "/" + p) ?? ""
+    if now != was then list.push(parts, "--- " + p + " ---\n" + unified_diff(was, now)) else ()
+  }
+  string.join(parts, "\n")
 }
 
 // The file without the markdown fence a model wraps it in, then decoded.
@@ -775,6 +821,18 @@ effect fn degenerate_write(root: String, path: String, source: String) -> String
 effect fn changed_files(root: String) -> List[String] = {
   let r = observe.run("git status --porcelain 2>/dev/null", root, 15000)!
   list.filter(list.map(string.split(r.stdout, "\n"), (l) => string.trim(string.drop(l, 3))), (f) => f != "" and not observe.is_noise(f) and not observe.is_noise((string.strip_suffix(f, "/") ?? f) + "/x"))
+}
+
+// What the run changed. In a repository git says, and it also sees files no edit accounts
+// for, which is why it is asked. Outside one `git status` prints nothing, and a run that
+// wrote a file reported `changed: []` -- to a caller reading the JSON, the same as a run
+// that wrote none. There the paths the attempts wrote stand in, except after a polish
+// that was rolled back, which put back exactly what it found.
+effect fn changed_by_run(root: String, dirty_before: List[String], attempts: List[Attempt], rolled_back: Bool) -> List[String] = {
+  let in_repo = observe.run("git rev-parse --is-inside-work-tree 2>/dev/null", root, 15000)!.code == 0
+  if in_repo then list.filter(changed_files(root)!, (f) => not list.contains(dirty_before, f))
+  else if rolled_back then []
+  else list.unique(list.flat_map(attempts, (t) => list.map(t.edits, (e) => e.path)))
 }
 
 // Reasons to distrust a passing test: tests touched, files changed that no
@@ -832,7 +890,7 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
   // wants the code said more simply, so it starts where solve would stop.
   if (option.map(obs.baseline, (b) => b.code == 0) ?? false) and not opts.polish_only then
     ok(Outcome { ok: true, attempts: [], changed: [], cost_usd: 0.0, wall_ms: env.millis() - started,
-      warnings: ["the verify command already passes: `" + obs.verify_command + "` exited 0 before anything ran, so nothing was changed"], harness_broken: "", polish_kept: none })
+      warnings: ["the verify command already passes: `" + obs.verify_command + "` exited 0 before anything ran, so nothing was changed"], harness_broken: "", polish_kept: none, unverified: false, diff: "" })
   else {
     phase(quiet, "select", "")!
     let (selected, select_cost) = select_files(creds, context, obs, opts.max_files, opts.model, quiet)!
@@ -865,7 +923,8 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
 
     var history = ""
     var harness_broken = ""
-    var unusable = 0          // attempts that produced no edit worth running; drives the ladder
+    var unverified = false
+    var unusable = 0         // attempts that produced no edit worth running; drives the ladder
     var last_attempt_ms = 0
     var stuck = 0             // the same failure twice in a row climbs one rung
     var last_failure_key = ""
@@ -876,6 +935,7 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
     var succeeded = opts.polish_only   // a PASS was reached and kept
     var polish_kept: Bool? = none
     var snapshot: List[(String, String)] = if opts.polish_only then snapshot_of(obs.root, paths)! else []
+    var originals: List[(String, String)] = []
     while not finished and (n <= opts.max_attempts or polishing) {
       let cost_before = total_cost
       let started_at = env.millis()
@@ -901,8 +961,8 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
       // `effort`, not `rung.effort`: this note used to print what the ladder asked for
       // while the guard was quietly using something lower, so the two notes contradicted
       // each other in the log and neither named what was actually sent.
-      if unusable > 0 then note(quiet, "last attempt produced nothing usable; reasoning=" + effort + (if rung.strong then ", model=" + ask.MODEL_STRONG else ""))! else ()
-      let model = if rung.strong then ask.MODEL_STRONG else opts.model
+      if unusable > 0 then note(quiet, "last attempt produced nothing usable; reasoning=" + effort + (if rung.strong then ", model=" + opts.strong_model else ""))! else ()
+      let model = if rung.strong then opts.strong_model else opts.model
 
       // Two rounds, not two attempts: an answer refused for its shape is a
       // formatting slip, and is asked again once with the reasons.
@@ -930,6 +990,7 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
               for r in batch.rejected { list.push(rejected, r) }
             },
           }
+          originals = remember_originals(obs.root, originals, edits)!
           let done = apply_edits(obs.root, edits, quiet)!
           edits = done.applied
           for r in done.rejected { list.push(rejected, r) }
@@ -950,14 +1011,18 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
       var passed = false
       if apply_error == "" and obs.verify_command != "" then {
         phase(quiet, "verify", "")!
-        let v = observe.run(obs.verify_command, obs.root, 120000)!
+        let v = observe.run(obs.verify_command, obs.root, opts.verify_timeout_ms)!
         verify = some(v)
         passed = v.code == 0
         if not quiet then eprintln("  " + (if passed then "PASS" else "FAIL") + " (exit " + int.to_string(v.code) + ", " + int.to_string(v.duration_ms) + "ms)") else ()
         note(quiet, "attempt " + int.to_string(n) + " took " + int.to_string((env.millis() - started_at) / 1000) + "s")!
         let broken = observe.harness_failure(v)
         if broken != "" then { harness_broken = broken; note(quiet, "verify command is broken: " + broken)!; finished = true } else ()
-      } else if apply_error == "" then list.push(warnings, "no verify command: success was not checked")
+      // No verify command: the edits are written and that is the end of it. This used to
+      // fall through to the next attempt, where the history said "result: FAILED" with no
+      // reason, and the model rewrote a change nobody had found anything wrong with -- up
+      // to --attempts times, each one paid for. A retry needs a failure to learn from.
+      } else if apply_error == "" then { list.push(warnings, "no verify command: success was not checked"); unverified = true; finished = true }
       else ()
 
       last_attempt_ms = env.millis() - started_at
@@ -1007,10 +1072,10 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
       n = n + 1
     }
 
-    let changed = list.filter(changed_files(obs.root)!, (f) => not list.contains(dirty_before, f))
+    let changed = changed_by_run(obs.root, dirty_before, attempts, opts.polish_only and polish_kept == some(false))!
     let solved = succeeded or (option.map(list.last(attempts), (a) => a.ok) ?? false)
     if solved then { for w in gaming_warnings(obs, attempts, changed)! { list.push(warnings, w) } } else ()
-    ok(Outcome { ok: solved, attempts: attempts, changed: changed, cost_usd: total_cost, wall_ms: env.millis() - started, warnings: warnings, harness_broken: harness_broken, polish_kept: polish_kept })
+    ok(Outcome { ok: solved, attempts: attempts, changed: changed, cost_usd: total_cost, wall_ms: env.millis() - started, warnings: warnings, harness_broken: harness_broken, polish_kept: polish_kept, unverified: unverified, diff: run_diff(obs.root, originals)! })
   }
 }
 
@@ -1100,6 +1165,52 @@ test "a snapshot restores the files it captured, and ignores the ones it could n
   assert_eq(fs.read_text(root + "/kept.almd") ?? "", "fn passing() -> Int = 1\n")
 }
 
+test "the run diff runs from before the first write to the end, over every attempt" {
+  let root = fs.create_temp_dir("golemide-rundiff")!
+  fs.write(root + "/a.py", "x = 1\ny = 1\n")!
+  var originals = remember_originals(root, [], [Edit { path: "a.py", source: "" }, Edit { path: "new.py", source: "" }])!
+  fs.write(root + "/a.py", "x = 2\ny = 1\n")!
+  // A second attempt writes a.py again: the original stays the one from before the first.
+  originals = remember_originals(root, originals, [Edit { path: "a.py", source: "" }])!
+  fs.write(root + "/a.py", "x = 2\ny = 2\n")!
+  fs.write(root + "/new.py", "z = 3\n")!
+  let d = run_diff(root, originals)!
+  assert(string.contains(d, "--- a.py ---"))
+  assert(string.contains(d, "- x = 1"))
+  assert(string.contains(d, "+ y = 2"))
+  assert(string.contains(d, "--- new.py ---\n+ z = 3"))
+  fs.remove_all(root)!
+}
+
+test "a rewrite in the same second is pushed to a later one, and nothing else waits" {
+  let root = fs.create_temp_dir("golemide-mtime")!
+  fs.write(root + "/a.py", "x = 1\n")!
+  let was = mtime_of(root + "/a.py")!
+  fs.write(root + "/a.py", "x = 2\n")!
+  bump_mtimes(root, [("a.py", was)])!
+  // Whether or not the rewrite crossed a second on its own, it now reads as newer.
+  assert(mtime_of(root + "/a.py")! > was)
+  // A file that did not exist before has no stale compile to fear.
+  fs.write(root + "/b.py", "y = 1\n")!
+  let t0 = env.millis()
+  bump_mtimes(root, [("b.py", -1)])!
+  assert(env.millis() - t0 < 500)
+  fs.remove_all(root)!
+}
+
+// Measured 2026-09-23: `solve --json` in a directory with no repository wrote calc.py and
+// reported `"changed": []`.
+test "outside a repository, what the attempts wrote is what changed" {
+  let root = fs.create_temp_dir("golemide-changed")!
+  let wrote = Attempt { n: 1, read: ["a.py"], edits: [Edit { path: "a.py", source: "x = 1\n" }, Edit { path: "b.py", source: "y = 1\n" }], rejected: [],
+    apply_error: "", verify: none, ok: false, cost_usd: 0.0, ms: 0, explanation: "" }
+  let again = Attempt { n: 2, read: ["a.py"], edits: [Edit { path: "a.py", source: "x = 2\n" }], rejected: [],
+    apply_error: "", verify: none, ok: true, cost_usd: 0.0, ms: 0, explanation: "" }
+  assert_eq(changed_by_run(root, [], [wrote, again], false)!, ["a.py", "b.py"])
+  assert_eq(changed_by_run(root, [], [wrote, again], true)!, [])
+  fs.remove_all(root)!
+}
+
 // The header carries the size because the model has to reproduce it exactly.
 test "an editable file is headed with the size a replacement has to match" {
   let root = fs.create_temp_dir("golemide-header")!
@@ -1116,51 +1227,22 @@ test "the reference's own file is not read again as source" {
   assert_eq(paths_to_read(["./CHEATSHEET.md", "x.almd"], "CHEATSHEET.md"), ["x.almd"])
 }
 
-test "replacements apply when unique, and are refused when they are not" {
-  let file = "fn a() -> Int = 1\nfn b() -> Int = 2\nfn c() -> Int = 1\n"
+test "a refused path names the shown file it was probably meant to be" {
+  let read = ["src/lib.rs", "src/main.rs", "tests/clamp.rs"]
 
-  // The ordinary case: unique text, swapped.
-  assert_eq(apply_replacements(file, [Replacement { old: "fn b() -> Int = 2", new: "fn b() -> Int = 9" }]),
-            ok("fn a() -> Int = 1\nfn b() -> Int = 9\nfn c() -> Int = 1\n"))
+  // One letter off, on the file name.
+  assert_eq(nearest_shown("src/lib.ts", read), some("src/lib.rs"))
+  // A directory the model invented, around the right name.
+  assert_eq(nearest_shown("crate/lib.rs", read), some("src/lib.rs"))
+  // Far from everything: no suggestion, rather than the least-wrong one.
+  assert_eq(nearest_shown("README.md", read), none)
+  // Equally close to two files is a guess, and a guess is not offered.
+  assert_eq(nearest_shown("src/lxb.rs", ["src/lib.rs", "src/lab.rs"]), none)
+  // Nothing shown, nothing to suggest.
+  assert_eq(nearest_shown("src/lib.rs", []), none)
 
-  // Several, in order. The second targets text the first introduced, which is why they
-  // are applied against the running result rather than the original.
-  assert_eq(apply_replacements("x = 1\n", [
-              Replacement { old: "x = 1", new: "y = 1" },
-              Replacement { old: "y = 1", new: "y = 2" }]),
-            ok("y = 2\n"))
-
-  // Deletion is a replacement with an empty `new`.
-  assert_eq(apply_replacements(file, [Replacement { old: "fn b() -> Int = 2\n", new: "" }]),
-            ok("fn a() -> Int = 1\nfn c() -> Int = 1\n"))
-
-  // Ambiguous: `= 1` is on two lines, so the model has not said which it meant. Refused
-  // rather than guessed -- guessing here silently edits the wrong line.
-  assert(result.is_err(apply_replacements(file, [Replacement { old: "-> Int = 1", new: "-> Int = 7" }])))
-  match apply_replacements(file, [Replacement { old: "-> Int = 1", new: "-> Int = 7" }]) {
-    err(e) => assert(string.contains(e, "more than once")),
-    ok(_) => assert(false),
-  }
-
-  // Not present at all: usually a quote from memory rather than from the file.
-  match apply_replacements(file, [Replacement { old: "fn zzz()", new: "x" }]) {
-    err(e) => assert(string.contains(e, "could not find this text")),
-    ok(_) => assert(false),
-  }
-
-  // An empty `old` would match at position zero and mean nothing.
-  assert(result.is_err(apply_replacements(file, [Replacement { old: "", new: "x" }])))
-
-  // The first failure stops the batch, so a file is never left half-edited.
-  match apply_replacements(file, [
-          Replacement { old: "fn a() -> Int = 1", new: "fn a() -> Int = 5" },
-          Replacement { old: "fn nope()", new: "x" }]) {
-    err(_) => (),
-    ok(_) => assert(false),
-  }
-
-  // No replacements is not a failure; it is the whole-file form.
-  assert_eq(apply_replacements(file, []), ok(file))
+  assert_eq(did_you_mean("src/lib.ts", read), " — did you mean `src/lib.rs`?")
+  assert_eq(did_you_mean("README.md", read), "")
 }
 
 test "an edit is well formed with either a source or replacements, and not with neither" {

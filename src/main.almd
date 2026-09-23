@@ -2,23 +2,29 @@
 //
 //   golemide solve <task> [--root DIR] [--verify CMD] [--attempts N] [--files N]
 //                        [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC]
+//   golemide edit         [--root DIR] [--create]      one edit on stdin, JSON out
 //   golemide observe      [--root DIR] [--verify CMD]
 //   golemide llm-test
 
 import env
+import io
 import process
 import self.llm
 import self.envfile
 import self.ask
 import self.observe
 import self.solve
+import self.report
+import self.tool
 
 let USAGE = """
 golemide — observe, then act
 
   golemide solve <task>  [--root DIR] [--verify CMD] [--attempts N] [--files N]
-                        [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC]
-  golemide polish [focus]  [--root DIR] [--verify CMD] [--files N] [--model M]
+                        [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC] [--json]
+  golemide polish [focus]  [--root DIR] [--verify CMD] [--files N] [--model M] [--json]
+  golemide edit          [--root DIR] [--create]
+                        stdin: {"path": P, "replacements": [{"old": O, "new": N}]} or {"path": P, "source": S}
   golemide observe       [--root DIR] [--verify CMD]
   golemide llm-test
 
@@ -28,17 +34,25 @@ Options
   --attempts N    edit/verify rounds before giving up (default 6)
   --files N       files read per attempt (default 6)
   --model M       model id (default cf:glm-5.3-flash)
-  --create        allow creating files that do not exist
+  --strong-model M  where repeated unusable or identical failures escalate to (default cf:glm-5.3);
+                  set it to --model to keep a run on one model
+  --create       allow creating files that do not exist
   --polish N      extra attempts that only simplify a passing result (default 0; measured at a 2-byte diff on one task)
   --quiet         only the final report
   --files-seen N  paths shown to the model (default 400)
   --explore N     rounds of looking around before editing: the model names shell
                   commands, they run, their output joins the prompt (default 0 = off).
-                  For tasks that ship no tests, where there is no verify command to have
+                  For tasks that ship no tests, where there is no failing command to read.
   --timeout SEC   how long the verify command may take (default 120)
+  --json          print one JSON object on stdout instead of the report; progress stays on stderr
+
+Exit status
+  solve, polish   0 solved, 1 not solved, 2 setup error, 3 nothing to do or the verify
+                  command does not run, 4 edits written but nothing checked them
+  edit            0 written, 1 refused (the reason is in the JSON), 2 the input was not an edit
 """
 
-let VALUED = ["root", "verify", "attempts", "files", "model", "files-seen", "timeout", "task", "polish", "explore"]
+let VALUED = ["root", "verify", "attempts", "files", "model", "strong-model", "files-seen", "timeout", "task", "polish", "explore"]
 
 type Args = { cmd: String, rest: List[String], flags: Map[String, String] }
 
@@ -57,11 +71,6 @@ fn parse_args(argv: List[String]) -> Args = {
   Args { cmd: list.get(argv, 0) ?? "", rest: rest, flags: flags }
 }
 
-fn usd(x: Float) -> String = {
-  let micros = float.to_int(x * 1000000.0 + 0.5)
-  "$" + int.to_string(micros / 1000000) + "." + string.pad_start(int.to_string(micros % 1000000), 6, "0")
-}
-
 effect fn load_env(root: String) -> Unit = {
   let home = env.get("HOME") ?? ""
   let _ = envfile.load([root, env.cwd() ?? ".", home + "/workspace/github.com/O6lvl4/_agent", home + "/workspace/github.com/Aid-On/famulus5", home + "/workspace/github.com/Aid-On/famulus4"])!
@@ -77,11 +86,13 @@ effect fn repo_map(root: String, task: String) -> (String, List[String]) =
     if r.code == 0 then (string.trim_end(r.stdout), []) else ("", ["repo map unavailable: " + string.trim(string.take(r.stderr, 200))])
   } else ("", ["repo map unavailable: gramide is not on PATH"])
 
-effect fn llm_test() -> Result[Unit, String] = {
+// `--model` is honoured so a benchmark can prove the model it is about to pay for,
+// not the default one.
+effect fn llm_test(a: Args) -> Result[Unit, String] = {
   load_env(".")!
   let creds = llm.credentials_from_env()! |> option.to_result("no credentials: set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN")!
-  let r = llm.invoke(creds, llm.Request { prompt: "Reply with exactly the word OK.", system: "", model: ask.MODEL_WORK, max_output_tokens: 64, reasoning_effort: "low", schema: none })!
-  println("text=" + string.trim(r.text) + " in=" + int.to_string(r.input_tokens) + " out=" + int.to_string(r.output_tokens) + " cost=" + usd(r.cost_usd) + " ms=" + int.to_string(r.duration_ms))
+  let r = llm.invoke(creds, llm.Request { prompt: "Reply with exactly the word OK.", system: "", model: map.get(a.flags, "model") ?? ask.MODEL_WORK, max_output_tokens: 64, reasoning_effort: "low", schema: none })!
+  println("text=" + string.trim(r.text) + " in=" + int.to_string(r.input_tokens) + " out=" + int.to_string(r.output_tokens) + " cost=" + report.usd(r.cost_usd) + " ms=" + int.to_string(r.duration_ms))
   ok(())
 }
 
@@ -101,7 +112,8 @@ effect fn run_observe(a: Args) -> Result[Unit, String] = {
   ok(())
 }
 
-// exit 0 solved, 1 not solved, 2 setup error, 3 nothing to do / harness broken
+// exit 0 solved, 1 not solved, 2 setup error, 3 nothing to do / harness broken,
+// 4 edits written with no verify command to check them (see report.exit_code)
 effect fn run_solve(a: Args) -> Result[Int, String] = {
   let task = string.trim(string.join(a.rest, " "))
   let root = map.get(a.flags, "root") ?? (env.cwd() ?? ".")
@@ -126,14 +138,43 @@ effect fn solve_with(a: Args, task: String, root: String, quiet: Bool, polish_on
   load_env(root)!
   let creds = llm.credentials_from_env()! |> option.to_result("no model credentials: put CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in .env or the environment")!
   let (rm, rmw) = repo_map(root, task)!
+  let verify_timeout_ms = (int.parse(map.get(a.flags, "timeout") ?? "120") ?? 120) * 1000
   let obs = observe.observe(root, map.get(a.flags, "verify") ?? "", int.parse(map.get(a.flags, "files-seen") ?? "400") ?? 400,
-    (int.parse(map.get(a.flags, "timeout") ?? "120") ?? 120) * 1000, rm, rmw)!
+    verify_timeout_ms, rm, rmw)!
   if not quiet then {
     eprintln("project: " + (option.map(obs.fingerprint, (f) => f.language + " (" + f.marker + ")") ?? "unknown (no marker)") + ", " + int.to_string(list.len(obs.files)) + " files")
     eprintln("verify:  " + (if obs.verify_command == "" then "(none)" else obs.verify_command) + " [" + obs.verify_source + "]")
     match obs.baseline { some(b) => eprintln("baseline: exit " + int.to_string(b.code) + " in " + int.to_string(b.duration_ms) + "ms"), none => () }
     for w in obs.repo_map_warnings { eprintln("warning: " + w) }
   } else ()
+  let json_mode = map.contains(a.flags, "json")
+  match stop_before(obs, map.contains(a.flags, "create"), polish_only) {
+    some(s) => {
+      say(json_mode, s.message, report.status_json(s.status, s.exit, string.trim(s.message), obs.verify_command), s.to_stderr)!
+      ok(s.exit)
+    },
+    none => {
+      let opts = solve.Options { max_attempts: int.parse(map.get(a.flags, "attempts") ?? "6") ?? 6, max_files: int.parse(map.get(a.flags, "files") ?? "6") ?? 6,
+        model: map.get(a.flags, "model") ?? ask.MODEL_WORK, allow_create: map.contains(a.flags, "create"), quiet: quiet, polish_only: polish_only,
+        polish: int.parse(map.get(a.flags, "polish") ?? "0") ?? 0,
+        // Off by default: a run with a verify command needs no exploration, and the
+        // property that makes golemide trustworthy (a success is a command exiting zero)
+        // should not be traded away unless asked for.
+        explore: int.parse(map.get(a.flags, "explore") ?? "0") ?? 0, verify_timeout_ms: verify_timeout_ms,
+        strong_model: map.get(a.flags, "strong-model") ?? ask.MODEL_STRONG }
+      let r = solve.solve(creds, task, obs, opts)!
+      say(json_mode, report.human(r, polish_only), report.outcome_json(r, obs.verify_command), false)!
+      ok(report.exit_code(r))
+    },
+  }
+}
+
+// A run that ends before the model is asked anything: why, with which exit status, and
+// whether the person reads it as an error.
+type Stop = { status: String, exit: Int, message: String, to_stderr: Bool }
+
+fn stop_before(obs: observe.Observation, allow_create: Bool, polish_only: Bool) -> Stop? = {
+  let green = option.map(obs.baseline, (b) => b.code == 0) ?? false
   // An empty root is only a dead end when nothing may be created. With --create it is the
   // ordinary starting state for work that writes a file that does not exist yet, and
   // refusing there refuses the whole task before the model is asked anything.
@@ -143,50 +184,29 @@ effect fn solve_with(a: Args, task: String, root: String, quiet: Bool, polish_on
   // all -- their package carries a Dockerfile and an instruction that says "create
   // /app/filter.py" -- and all three ended here, in under 45 seconds, for $0.00, having
   // never called the model. 26 of the 89 tasks ship no source files in their package.
-  if list.is_empty(obs.files) and not map.contains(a.flags, "create") then {
-    eprintln("\nno source files found under " + obs.root
+  if list.is_empty(obs.files) and not allow_create then some(Stop { status: "no_source", exit: 3, to_stderr: true,
+    message: "\nno source files found under " + obs.root
       + "\n  nothing here can be read, so nothing can be fixed."
-      + "\n  If the work is to write a file that does not exist yet, pass --create.")
-    ok(3)
-  }
-  else if obs.harness_broken != "" then {
-    eprintln("\nthe verify command did not run: " + obs.harness_broken + "\n  $ " + obs.verify_command + "\n" + (option.map(obs.baseline, (b) => observe.tail(string.trim(b.stdout + "\n" + b.stderr), 10)) ?? "") + "\nFix the command (or the environment) and run again. Nothing the agent writes can change this outcome.")
-    ok(3)
-  }
-  else if (option.map(obs.baseline, (b) => b.code == 0) ?? false) and not polish_only then { println("\n" + obs.verify_command + " already passes — nothing was changed.\n  If there is work to do here, give a --verify that fails first."); ok(0) }
-  else if polish_only and not (option.map(obs.baseline, (b) => b.code == 0) ?? false) then {
-    println("\n" + obs.verify_command + " does not pass — polish only rewrites code that already works.\n  Run `golemide solve` first, or give a --verify that passes.")
-    ok(3)
-  }
-  else {
-    let opts = solve.Options { max_attempts: int.parse(map.get(a.flags, "attempts") ?? "6") ?? 6, max_files: int.parse(map.get(a.flags, "files") ?? "6") ?? 6,
-      model: map.get(a.flags, "model") ?? ask.MODEL_WORK, allow_create: map.contains(a.flags, "create"), quiet: quiet, polish_only: polish_only,
-      polish: int.parse(map.get(a.flags, "polish") ?? "0") ?? 0,
-      // Off by default: a run with a verify command needs no exploration, and the
-      // property that makes golemide trustworthy (a success is a command exiting zero)
-      // should not be traded away unless asked for.
-      explore: int.parse(map.get(a.flags, "explore") ?? "0") ?? 0 }
-    let r = solve.solve(creds, task, obs, opts)!
-    // A rolled-back polish leaves the tree exactly as it found it, which is not
-    // the same news as a repair that landed.
-    let headline = match r.polish_kept {
-      some(kept) => if polish_only then (if kept then "POLISHED" else "UNCHANGED — the simpler version did not pass")
-                    else (if r.ok then (if kept then "SOLVED, and the simpler version kept" else "SOLVED, the polish rolled back") else "NOT SOLVED"),
-      none => if r.ok then "SOLVED" else "NOT SOLVED",
-    }
-    println("\n" + headline + " in " + int.to_string(list.len(r.attempts)) + " attempt(s), " + usd(r.cost_usd) + ", " + int.to_string(r.wall_ms / 1000) + "s")
-    if not list.is_empty(r.changed) then println("changed: " + string.join(r.changed, ", ")) else ()
-    for w in r.warnings { println("WARNING: " + w) }
-    if r.harness_broken != "" then println("the verify command stopped working mid-run: " + r.harness_broken + "\nthe edits on disk were never actually checked.")
-    else if not r.ok then {
-      let why = match list.last(r.attempts) {
-        some(last) => if last.apply_error != "" then last.apply_error else match last.verify { some(v) => "verify exited " + int.to_string(v.code), none => "no attempt completed" },
-        none => "no attempt completed",
-      }
-      println("reason: " + why)
-    } else ()
-    ok(if r.ok then 0 else 1)
-  }
+      + "\n  If the work is to write a file that does not exist yet, pass --create." })
+  else if obs.harness_broken != "" then some(Stop { status: "harness_broken", exit: 3, to_stderr: true,
+    message: "\nthe verify command did not run: " + obs.harness_broken + "\n  $ " + obs.verify_command + "\n" + (option.map(obs.baseline, (b) => observe.tail(string.trim(b.stdout + "\n" + b.stderr), 10)) ?? "") + "\nFix the command (or the environment) and run again. Nothing the agent writes can change this outcome." })
+  else if green and not polish_only then some(Stop { status: "already_passes", exit: 0, to_stderr: false,
+    message: "\n" + obs.verify_command + " already passes — nothing was changed.\n  If there is work to do here, give a --verify that fails first." })
+  else if polish_only and not green then some(Stop { status: "not_passing", exit: 3, to_stderr: false,
+    message: "\n" + obs.verify_command + " does not pass — polish only rewrites code that already works.\n  Run `golemide solve` first, or give a --verify that passes." })
+  else none
+}
+
+// With --json, stdout carries exactly one JSON document and the human text is not printed.
+effect fn say(json_mode: Bool, human: String, doc: String, to_stderr: Bool) -> Unit =
+  if json_mode then println(doc) else if to_stderr then eprintln(human) else println(human)
+
+// One edit decided by the caller, through the same checks `solve` applies to the model's.
+effect fn run_edit(a: Args) -> Result[Int, String] = {
+  let root = tool.absolute_root(map.get(a.flags, "root") ?? ".", env.cwd() ?? ".")
+  let r = tool.apply_request(root, io.read_all()!, map.contains(a.flags, "create"))!
+  println(tool.result_json(r))
+  ok(r.code)
 }
 
 effect fn finish(r: Result[Int, String]) -> Unit = match r {
@@ -197,9 +217,10 @@ effect fn finish(r: Result[Int, String]) -> Unit = match r {
 effect fn main() -> Unit = {
   let a = parse_args(env.args())
   if a.cmd == "" or a.cmd == "help" or map.contains(a.flags, "help") then { println(USAGE); process.exit(if a.cmd == "" then 1 else 0) }
-  else if a.cmd == "llm-test" then finish(result.map(llm_test(), (_) => 0))!
+  else if a.cmd == "llm-test" then finish(result.map(llm_test(a), (_) => 0))!
   else if a.cmd == "observe" then finish(result.map(run_observe(a), (_) => 0))!
   else if a.cmd == "solve" then finish(run_solve(a))!
   else if a.cmd == "polish" then finish(run_polish(a))!
+  else if a.cmd == "edit" then finish(run_edit(a))!
   else { eprintln("unknown command: " + a.cmd + "\n" + USAGE); process.exit(1) }
 }

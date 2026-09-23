@@ -50,6 +50,25 @@ rolled back to the version that did.
 ./golemide polish --root ../project --verify "cargo test"
 ```
 
+### Called by another agent
+
+`solve --json` and `polish --json` print one JSON object on stdout in place of the report.
+It carries the status, exit code, cost, each attempt, the diff of the whole run and the
+tail of the last verify output. Progress stays on stderr. Without a verify command, `solve` writes one attempt
+and stops with exit 4, because nothing could check a second.
+
+`golemide edit` applies an edit the caller has already decided on. The edit goes
+through the same path, replacement and syntax checks as the edits `solve` asks the model for:
+
+```sh
+echo '{"path": "src/lib.rs", "replacements": [{"old": "a + b", "new": "a - b"}]}' \
+  | ./golemide edit --root ../project
+# {"ok":true,"path":"src/lib.rs","bytes":812,"checked_by":"gramide","matched":[],"diff":"…"}
+```
+
+It exits 0 when the file was written, 1 when the edit was refused with a reason, and
+2 when the input was not an edit.
+
 ## From observation to a verified edit
 
 1. **Observe.** Inspect the project, list its files, build a repository map when
@@ -149,6 +168,9 @@ CI pins the compiler and Rust versions. See [reproducible checks](ci/README.md).
 | `src/main.almd` | Commands, options and credentials |
 | `src/observe.almd` | Project inspection and verification commands |
 | `src/solve.almd` | File selection and the edit/verify loop |
+| `src/replace.almd` | Finding the text a replacement names, exactly or by a fixed ladder of loosenings |
+| `src/report.almd` | The final report, for a person or as JSON |
+| `src/tool.almd` | `golemide edit`: one caller-decided edit through the write checks |
 | `src/gate.almd` | Syntax checks before writes |
 | `src/reference.almd` | The language reference shown to the model |
 | `src/explain.almd` | Compiler diagnostic explanations |

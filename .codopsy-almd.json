@@ -4,8 +4,11 @@
   "src/explain.almd": 6,
   "src/gate.almd": 7,
   "src/llm.almd": 16,
-  "src/main.almd": 23,
+  "src/main.almd": 8,
   "src/observe.almd": 11,
   "src/reference.almd": 6,
-  "src/solve.almd": 45
+  "src/replace.almd": 10,
+  "src/report.almd": 8,
+  "src/solve.almd": 45,
+  "src/tool.almd": 9
 }
