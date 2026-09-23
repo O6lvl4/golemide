@@ -195,10 +195,7 @@ fn anchored(block: List[String], want: List[String]) -> Bool = {
 // would never reach it.
 type Step = { how: String, by_lines: Bool, run: fn(String, String) -> List[Candidate] }
 
-// A function, not a `let`: a top-level value holding closures does not compile natively.
-// A fn, not a top-level `let`: a list of records holding closures, held at the top
-// level, compiles to Rust that rustc rejects (almide#2537).
-fn steps() -> List[Step] = [
+let STEPS: List[Step] = [
   Step { how: "", by_lines: false, run: exact },
   Step { how: "after stripping line-number prefixes", by_lines: false, run: (t, n) => match strip_line_numbers(n) { some(s) => if s == n then [] else exact(t, s), none => [] } },
   Step { how: "after unescaping \\n, \\t and quotes", by_lines: false, run: (t, n) => { let u = unescape(n); if u == n then [] else exact(t, u) } },
@@ -311,7 +308,7 @@ fn not_found(text: String, old: String) -> String = {
 fn find(text: String, old: String) -> Result[Found, String] = {
   var out: Result[Found, String] = err(not_found(text, old))
   var settled = false
-  for step in steps() {
+  for step in STEPS {
     if settled then ()
     else {
       let cs = step.run(text, old)
