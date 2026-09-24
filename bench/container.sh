@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# golemide, ZCode and Aider on the polyglot benchmark, in one environment.
+# golemide, comide, ZCode, the Cursor CLI and Aider on the polyglot benchmark, in one environment.
 #
 # The first comparison ran golemide on the host, Aider in Aider's Docker image and
 # ZCode on the host again, and the environments differed in a way that decided
@@ -17,6 +17,9 @@
 #               golemide@N  golemide with N attempts, pinned to MODEL (no strong-model rung)
 #               zcode       ZCode headless, 900 s per exercise, reasoning low
 #               aider       Aider's own harness, two tries, diff format, reasoning low
+#               comide      comide headless on its own defaults, 900 s per exercise
+#               cursor      the Cursor CLI headless, CURSOR_MODEL or Cursor's default, 900 s per exercise
+#   CURSOR_MODEL  for the cursor arm; empty = Cursor's default (auto)
 #   MODEL     one model for every arm              (default: cf:glm-5.3-flash)
 #   RUNS      runs per arm                         (default: 1)
 #   JOBS      exercises in parallel                (default: 4)
@@ -24,7 +27,7 @@
 #   OUT       results, logs and the build context  (default: $TMPDIR/golemide-container)
 #   POLYGLOT  the benchmark checkout               (default: ../polyglot-benchmark)
 #   ZCODE_SHA the ZCode commit to build            (default: the one first measured)
-#   COMPANIONS_DIR  local clones of gramide, hew and ctxgate (default: ~/workspace/github.com/O6lvl4)
+#   COMPANIONS_DIR  local clones of gramide-cli, hew, ctxgate and comide (default: ~/workspace/github.com/O6lvl4)
 #   DRY_RUN=1 build the image and prove it, run no arm
 #
 # Time and money at the defaults, from the separate runs on 2026-09-22: golemide@2 about
@@ -50,13 +53,16 @@ slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9.-' '_'; }
 echo "== preflight =="
 docker info >/dev/null 2>&1 || { echo "Docker is not running." >&2; exit 2; }
 [ -n "$POLYGLOT" ] && [ -d "$POLYGLOT" ] || { echo "polyglot-benchmark not found" >&2; exit 2; }
-for d in "$ROOT" "$PWD" "$HOME/workspace/github.com/O6lvl4/_agent" "$HOME/workspace/github.com/Aid-On/famulus5" "$HOME/workspace/github.com/Aid-On/famulus4"; do
+# The same places golemide and comide read credentials from (src/envfile.almd).
+for d in "$ROOT" "$PWD" "${XDG_CONFIG_HOME:-$HOME/.config}/golemide"; do
   [ -f "$d/.env" ] || continue
   [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ] && CLOUDFLARE_ACCOUNT_ID="$(sed -n 's/^CLOUDFLARE_ACCOUNT_ID=//p' "$d/.env" | head -1 | tr -d '"'"'"' ')"
   [ -z "${CLOUDFLARE_API_TOKEN:-}" ] && CLOUDFLARE_API_TOKEN="$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' "$d/.env" | head -1 | tr -d '"'"'"' ')"
+  [ -z "${CURSOR_API_KEY:-}" ] && CURSOR_API_KEY="$(sed -n 's/^CURSOR_API_KEY=//p' "$d/.env" | head -1 | tr -d '"'"'"' ')"
 done
 [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] && [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || { echo "no CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN" >&2; exit 2; }
-export CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN
+case " $ARMS " in *" cursor "*) [ -n "${CURSOR_API_KEY:-}" ] || { echo "the cursor arm needs CURSOR_API_KEY (environment, or a .env above)" >&2; exit 2; } ;; esac
+export CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN CURSOR_API_KEY="${CURSOR_API_KEY:-}"
 mkdir -p "$OUT"
 if ! docker image inspect aider-benchmark >/dev/null 2>&1; then
   echo "  building Aider's benchmark image first (bench/aider.sh, DRY_RUN)"
@@ -64,21 +70,30 @@ if ! docker image inspect aider-benchmark >/dev/null 2>&1; then
 fi
 
 # ---- the build context: exactly what is being measured ------------------------------------------
-CTX="$OUT/context"; rm -rf "$CTX"; mkdir -p "$CTX/golemide" "$CTX/companions"
+CTX="$OUT/context"; rm -rf "$CTX"; mkdir -p "$CTX/golemide" "$CTX/comide" "$CTX/companions"
 # golemide's working tree as it is, uncommitted changes included — that is what was
 # measured on the host — minus the host binary and the README images.
 ( cd "$ROOT" && git ls-files -co --exclude-standard | grep -vx golemide | grep -v '^docs/images/' | tar -cf - -T - ) | tar -xf - -C "$CTX/golemide"
 version="$(git -C "$ROOT" rev-parse --short HEAD)$(git -C "$ROOT" diff --quiet HEAD -- src bench || echo '+dirty')"
 printf '%s\n' "$version" > "$CTX/golemide/.bench-version"
 versions="golemide $version"
+# comide the same way: its working tree as it is, minus the host binary and images.
+COMIDE_DIR="${COMIDE_DIR:-$COMPANIONS_DIR/comide}"
+( cd "$COMIDE_DIR" && git ls-files -co --exclude-standard | grep -vx comide | grep -v '^docs/images/' | tar -cf - -T - ) | tar -xf - -C "$CTX/comide"
+cversion="$(git -C "$COMIDE_DIR" rev-parse --short HEAD)$(git -C "$COMIDE_DIR" diff --quiet HEAD -- src || echo '+dirty')"
+printf '%s\n' "$cversion" > "$CTX/comide/.bench-version"
+versions="$versions, comide $cversion"
+# The gramide command is built from gramide-cli: gramide itself is the library and its
+# language packages, and builds no command of its own any more.
 for t in gramide hew ctxgate; do
+  repo="$t"; [ "$t" = gramide ] && repo=gramide-cli
   mkdir -p "$CTX/companions/$t"
-  if [ -d "$COMPANIONS_DIR/$t/.git" ]; then
-    git -C "$COMPANIONS_DIR/$t" archive HEAD | tar -xf - -C "$CTX/companions/$t"
-    versions="$versions, $t $(git -C "$COMPANIONS_DIR/$t" rev-parse --short HEAD)"
+  if [ -d "$COMPANIONS_DIR/$repo/.git" ]; then
+    git -C "$COMPANIONS_DIR/$repo" archive HEAD | tar -xf - -C "$CTX/companions/$t"
+    versions="$versions, $repo $(git -C "$COMPANIONS_DIR/$repo" rev-parse --short HEAD)"
   else
-    git clone -q --depth 1 "https://github.com/O6lvl4/$t" "$CTX/companions/$t.git" && mv "$CTX/companions/$t.git"/* "$CTX/companions/$t/"
-    versions="$versions, $t $(git -C "$CTX/companions/$t.git" rev-parse --short HEAD) (fresh clone)"
+    git clone -q --depth 1 "https://github.com/O6lvl4/$repo" "$CTX/companions/$t.git" && mv "$CTX/companions/$t.git"/* "$CTX/companions/$t/"
+    versions="$versions, $repo $(git -C "$CTX/companions/$t.git" rev-parse --short HEAD) (fresh clone)"
   fi
 done
 cp "$ROOT/bench/container/Dockerfile" "$CTX/Dockerfile"
@@ -114,10 +129,10 @@ for arm in $ARMS; do
         latest="$(ls -td "${TMPDIR:-/tmp}"/golemide-aider/aider/tmp.benchmarks/*--"$(slug "$MODEL")"-diff-* 2>/dev/null | head -1)"
         mkdir -p "$dest" && cp "$latest/results.tsv" "$dest/results.tsv" && echo "$latest" > "$dest/source"
       done ;;
-    golemide@*|zcode)
+    golemide@*|zcode|comide|cursor)
       docker run --rm --name "golemide-bench-$name" \
         -v "$POLYGLOT":/polyglot:ro -v "$OUT":/out \
-        -e CLOUDFLARE_ACCOUNT_ID -e CLOUDFLARE_API_TOKEN \
+        -e CLOUDFLARE_ACCOUNT_ID -e CLOUDFLARE_API_TOKEN -e CURSOR_API_KEY -e CURSOR_MODEL \
         -e MODEL="$MODEL" -e RUNS="$RUNS" -e JOBS="$JOBS" -e LANGS="$LANGS" \
         "$IMAGE" bash /opt/golemide/bench/container/run-arm.sh "$arm" 2>&1 \
         | tee "$OUT/$name.log" | grep -E '^==|^\| \*\*total|CHANGED|^  !!' ;;
@@ -133,6 +148,7 @@ def results(arm):
     name = arm.replace("@", "-")
     if arm.startswith("golemide@"): pat = f"{out}/{name}/{mslug}/run-*/results.tsv"
     elif arm == "zcode": pat = f"{out}/zcode/{mslug}-low/run-*/results.tsv"
+    elif arm in ("comide", "cursor"): pat = f"{out}/{arm}/run-*/results.tsv"
     else: pat = f"{out}/aider/run-*/results.tsv"
     runs = []
     for p in sorted(glob.glob(pat)):
@@ -160,5 +176,6 @@ print("| cost | " + " | ".join(f"${statistics.mean(sum(v[1] for v in rows.values
 changed = [a for a in data if a != "aider" and os.path.getsize(f"{out}/{a.replace('@', '-')}.env-changes") > 0] if data else []
 print("\nEnvironment changed during the run by: " + (", ".join(changed) if changed else "none of the containerised arms") + ".")
 print("Aider runs in its own copy of the same base image. Self-reported; runs per arm as shown.")
+print("comide runs on cf:glm-5.3 with golemide's solve on cf:glm-5.3-flash; the cursor arm on Cursor's model (its cost is on Cursor's dashboard, not here).")
 PY
 echo "written: $OUT/summary.md"

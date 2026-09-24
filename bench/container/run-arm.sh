@@ -4,8 +4,10 @@
 #   run-arm.sh golemide@2     golemide with two attempts (the leaderboard's protocol)
 #   run-arm.sh golemide@8     golemide with eight attempts, still on one model
 #   run-arm.sh zcode          ZCode headless, one session per exercise
+#   run-arm.sh comide         comide headless (`comide run --yes`), one session per exercise
+#   run-arm.sh cursor         the Cursor CLI headless (`cursor-agent -p --force`), likewise
 #
-# MODEL, RUNS, JOBS, LANGS and the Cloudflare credentials come from `docker run -e`.
+# MODEL, RUNS, JOBS, LANGS, CURSOR_MODEL and the credentials come from `docker run -e`.
 # Results land under /out, which bench/container.sh mounts from the host.
 set -uo pipefail
 
@@ -33,6 +35,8 @@ case "$arm" in
   zcode)
     OUT=/out/zcode ZCODE=/opt/ZCode ZCODE_NODE=/opt/node24/bin/node ZCODE_HOME_DIR=/tmp/zcode-home \
       bash /opt/golemide/bench/zcode.sh ;;
+  comide|cursor)
+    OUT="/out/$arm" AGENT="$arm" bash /opt/golemide/bench/headless.sh ;;
   *) echo "unknown arm: $arm" >&2; exit 2 ;;
 esac
 status=$?
