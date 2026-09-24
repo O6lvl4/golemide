@@ -31,7 +31,7 @@ type Attempt = { n: Int, read: List[String], edits: List[Edit], rejected: List[R
 // `diff` is what the run did, each written file from before its first write to now.
 // The per-attempt diffs say what each attempt changed from the last; a caller that
 // has to explain the result needs the sum.
-type Outcome = { ok: Bool, attempts: List[Attempt], changed: List[String], cost_usd: Float, wall_ms: Int, warnings: List[String], harness_broken: String, polish_kept: Bool?, unverified: Bool, diff: String }
+type Outcome = { ok: Bool, attempts: List[Attempt], changed: List[String], cost_usd: Float, wall_ms: Int, warnings: List[String], harness_broken: String, polish_kept: Bool?, unverified: Bool, diff: String, throttled: Int, throttled_ms: Int }
 // `verify_timeout_ms` is the same number the baseline observation ran under. It used to be
 // a fixed 120 s here while `--timeout` changed only the baseline, so a slow test suite
 // passed its first run and timed out on every attempt after it.
@@ -356,6 +356,13 @@ effect fn note(quiet: Bool, text: String) -> Unit = if quiet then () else eprint
 // A hedge that never wins is a second request paid for and thrown away; one
 // that usually wins says the first request was not going to finish in time.
 // Neither can be told from the outside, so both are said out loud.
+// ", 40s of it waiting on 2 rate limits", or "" when this attempt was never throttled.
+fn throttle_note(now: (Int, Int), count_before: Int, ms_before: Int) -> String = {
+  let (count, ms) = now
+  if count == count_before then ""
+  else ", " + int.to_string((ms - ms_before) / 1000) + "s of it waiting on " + int.to_string(count - count_before) + " rate limit(s)"
+}
+
 effect fn note_hedges(quiet: Bool, hedged: Int, wins: Int) -> Unit =
   if hedged > 0 then note(quiet, "hedged " + int.to_string(hedged) + " slow request(s), "
     + (if wins == 0 then "and the first answer still won every time — the second was paid for and discarded"
@@ -867,6 +874,22 @@ fn edit_of(v: Value) -> Edit? = match json.get_string(v, "path") {
 
 fn first_line(s: String) -> String = string.take(list.first(string.split(s, "\n")) ?? "", 80)
 
+// Why the verify command counts as broken after an edit, or "". A timeout is the
+// harness's fault only when the untouched code timed out too: when the baseline run
+// finished and failed, the edit is what made the command hang. Measured 2026-09-24 on
+// python/forth: the model wrote a loop that never advanced, verify hit its deadline,
+// the run stopped as harness_broken after 2 attempts, and the caller spent 40 steps
+// finding the missing `i += 1` that a retry told "it hangs" would have looked for.
+fn mid_run_harness_failure(v: observe.CommandResult, baseline: observe.CommandResult?) -> String = {
+  let baseline_hung = match baseline { some(b) => b.timed_out, none => false }
+  if v.timed_out and not baseline_hung then "" else observe.harness_failure(v)
+}
+
+fn hang_note(timeout_ms: Int) -> String =
+  "the verify command did not finish within " + int.to_string(timeout_ms / 1000) + "s and was stopped: "
+    + "the code as written most likely loops forever, waits for input, or is far too slow. "
+    + "Look for a loop whose index or condition never changes.\n"
+
 effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, opts: Options) -> Result[Outcome, String] = {
   let started = env.millis()
   let quiet = opts.quiet
@@ -890,7 +913,7 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
   // wants the code said more simply, so it starts where solve would stop.
   if (option.map(obs.baseline, (b) => b.code == 0) ?? false) and not opts.polish_only then
     ok(Outcome { ok: true, attempts: [], changed: [], cost_usd: 0.0, wall_ms: env.millis() - started,
-      warnings: ["the verify command already passes: `" + obs.verify_command + "` exited 0 before anything ran, so nothing was changed"], harness_broken: "", polish_kept: none, unverified: false, diff: "" })
+      warnings: ["the verify command already passes: `" + obs.verify_command + "` exited 0 before anything ran, so nothing was changed"], harness_broken: "", polish_kept: none, unverified: false, diff: "", throttled: (ask.throttle_waits()!).0, throttled_ms: (ask.throttle_waits()!).1 })
   else {
     phase(quiet, "select", "")!
     let (selected, select_cost) = select_files(creds, context, obs, opts.max_files, opts.model, quiet)!
@@ -939,6 +962,7 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
     while not finished and (n <= opts.max_attempts or polishing) {
       let cost_before = total_cost
       let started_at = env.millis()
+      let (throttled_before, throttled_ms_before) = ask.throttle_waits()!
       phase(quiet, "edit", if polishing then "polish" else "attempt " + int.to_string(n) + "/" + int.to_string(opts.max_attempts))!
       let (block, read) = render_files(obs.root, paths, quiet)!
       // A polish is included: it runs after a PASS, so a failing baseline is stale
@@ -1015,8 +1039,9 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
         verify = some(v)
         passed = v.code == 0
         if not quiet then eprintln("  " + (if passed then "PASS" else "FAIL") + " (exit " + int.to_string(v.code) + ", " + int.to_string(v.duration_ms) + "ms)") else ()
-        note(quiet, "attempt " + int.to_string(n) + " took " + int.to_string((env.millis() - started_at) / 1000) + "s")!
-        let broken = observe.harness_failure(v)
+        note(quiet, "attempt " + int.to_string(n) + " took " + int.to_string((env.millis() - started_at) / 1000) + "s"
+          + throttle_note(ask.throttle_waits()!, throttled_before, throttled_ms_before))!
+        let broken = mid_run_harness_failure(v, obs.baseline)
         if broken != "" then { harness_broken = broken; note(quiet, "verify command is broken: " + broken)!; finished = true } else ()
       // No verify command: the edits are written and that is the end of it. This used to
       // fall through to the next attempt, where the history said "result: FAILED" with no
@@ -1051,7 +1076,11 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
 
       if not finished then {
         let why = if apply_error != "" then apply_error
-          else match verify { some(v) => failure_view(obs.verify_command, v.stdout + "\n" + v.stderr, obs.root, 40, quiet)!, none => "unknown" }
+          else match verify {
+            some(v) => (if v.timed_out then hang_note(opts.verify_timeout_ms) else "")
+              + failure_view(obs.verify_command, v.stdout + "\n" + v.stderr, obs.root, 40, quiet)!,
+            none => "unknown",
+          }
         let explanations = match verify {
           some(v) => explained_diagnostics(obs, v.stdout + "\n" + v.stderr, "explained ", quiet)!,
           none => "",
@@ -1075,7 +1104,8 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
     let changed = changed_by_run(obs.root, dirty_before, attempts, opts.polish_only and polish_kept == some(false))!
     let solved = succeeded or (option.map(list.last(attempts), (a) => a.ok) ?? false)
     if solved then { for w in gaming_warnings(obs, attempts, changed)! { list.push(warnings, w) } } else ()
-    ok(Outcome { ok: solved, attempts: attempts, changed: changed, cost_usd: total_cost, wall_ms: env.millis() - started, warnings: warnings, harness_broken: harness_broken, polish_kept: polish_kept, unverified: unverified, diff: run_diff(obs.root, originals)! })
+    let (throttle_count, throttle_ms) = ask.throttle_waits()!
+    ok(Outcome { ok: solved, attempts: attempts, changed: changed, cost_usd: total_cost, wall_ms: env.millis() - started, warnings: warnings, harness_broken: harness_broken, polish_kept: polish_kept, unverified: unverified, diff: run_diff(obs.root, originals)!, throttled: throttle_count, throttled_ms: throttle_ms })
   }
 }
 
@@ -1297,6 +1327,19 @@ test "a reference from outside the project filters nothing" {
   let selected = ["CHEATSHEET.md", "roman_numerals.almd"]
   assert_eq(paths_to_read(selected, ""), selected)
   assert_eq(paths_to_read(selected, "docs/CHEATSHEET.md"), selected)
+}
+
+test "an attempt says how much of it went to rate limits, and nothing when there were none" {
+  assert_eq(throttle_note((3, 45000), 1, 5000), ", 40s of it waiting on 2 rate limit(s)")
+  assert_eq(throttle_note((1, 5000), 1, 5000), "")
+}
+
+test "a timeout after an edit is the edit's fault unless the untouched code timed out too" {
+  let hung = observe.CommandResult { command: "pytest", code: -1, stdout: "", stderr: "", timed_out: true, duration_ms: 120000, spawn_error: "" }
+  let failed = observe.CommandResult { command: "pytest", code: 1, stdout: "FAILED test_a", stderr: "", timed_out: false, duration_ms: 400, spawn_error: "" }
+  assert_eq(mid_run_harness_failure(hung, some(failed)), "")
+  assert_eq(mid_run_harness_failure(hung, some(hung)), "the command timed out")
+  assert(string.contains(hang_note(120000), "within 120s"))
 }
 
 test "a retry is not shown the baseline output, which is no longer current" {

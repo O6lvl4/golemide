@@ -127,6 +127,21 @@ fn backoff(n: Int) -> Int = {
   int.min(60000, w)
 }
 
+// Every wait on a rate limit (HTTP 429) in this process: how many, and how long in all.
+// Kept for the whole run, not per call, so the report can say how much of the wall
+// time went to being throttled rather than to working. Measured 2026-09-24: a
+// benchmark exercise ran past its 15-minute cap with its tests taking a second, and
+// nothing in the log could say whether the model was slow or the account was throttled.
+var throttled = 0
+var throttled_ms = 0
+
+effect fn throttle_waits() -> (Int, Int) = (throttled, throttled_ms)
+
+effect fn count_throttle(ms: Int) -> Unit = {
+  throttled = throttled + 1
+  throttled_ms = throttled_ms + ms
+}
+
 // Ask for a value matching `schema`, and parse it. Constrained decoding on
 // Workers AI enforces shape, not size; callers check arity themselves.
 effect fn ask_json(creds: llm.Credentials, prompt: String, schema: Value, o: Options) -> Result[Asked, String] = {
@@ -201,6 +216,7 @@ effect fn ask_json(creds: llm.Credentials, prompt: String, schema: Value, o: Opt
             rate_limited = rate_limited + 1
             if rate_limited > 6 then stop = true
             else wait_ms = backoff(rate_limited) + (env.millis() % 1000)
+            if not stop then { count_throttle(wait_ms)! } else ()
           } else if is_budget_truncation(m) or is_server_timeout(m) then {
             attempt = attempt + 1
             if attempt >= 5 then stop = true else wait_ms = 0
