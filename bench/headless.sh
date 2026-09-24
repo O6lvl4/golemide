@@ -14,6 +14,8 @@
 #   AGENT         comide or cursor                              (required)
 #   CURSOR_MODEL  passed to cursor-agent --model; empty = Cursor's default (auto)
 #   WALL          seconds one exercise may take before the agent is stopped (default: 900)
+#   HIDE_VERIFY   1 = the prompt does not name the verify command: the agent has to find
+#                 out for itself how to check its work, as it would from a person's request
 #   RUNS / LANGS / JOBS / OUT / POLYGLOT   as in leaderboard.sh
 #
 # comide runs on its own defaults (cf:glm-5.3 for the conversation, golemide's
@@ -31,6 +33,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENT="${AGENT:-}"
 CURSOR_MODEL="${CURSOR_MODEL:-}"
 WALL="${WALL:-900}"
+HIDE_VERIFY="${HIDE_VERIFY:-0}"
 RUNS="${RUNS:-1}"
 LANGS="${LANGS:-cpp go java javascript python rust}"
 JOBS="${JOBS:-4}"
@@ -43,15 +46,25 @@ export VERIFY_DEADLINE="${VERIFY_DEADLINE:-600}"
 if [ "${1:-}" = "--agent" ]; then
   task="$2"; dir="$3"; verify="$4"
   started=$(date +%s)
-  prompt="$task
+  if [ "$HIDE_VERIFY" = 1 ]; then
+    # The harness still re-checks with $verify afterwards; the agent is not told it.
+    prompt="$task
+
+The code to change is in the current directory. Do not modify the test files."
+  else
+    prompt="$task
 
 The code to change is in the current directory. Run \`$verify\` to check your work, and keep working until it passes. Do not modify the test files. When it passes, stop."
+  fi
   echo "[edit] attempt 1/1 ($AGENT, wall cap ${WALL}s)"
   out="$dir.$AGENT.out"; err="$dir.$AGENT.err"
   # A group of its own, so the wall cap stops the agent and everything it started.
   case "$AGENT" in
     comide)
-      setsid bash -c 'cd "$1" && exec comide run "$2" --yes --root "$1"' _ "$dir" "$prompt" > "$out" 2> "$err" & ;;
+      # The cost so far, written by comide after every step: a comide stopped at the
+      # wall cap prints no footer.
+      rm -f "$dir.$AGENT.cost"
+      COMIDE_COST_FILE="$dir.$AGENT.cost" setsid bash -c 'cd "$1" && exec comide run "$2" --yes --root "$1"' _ "$dir" "$prompt" > "$out" 2> "$err" & ;;
     cursor)
       model_flag=(); [ -n "$CURSOR_MODEL" ] && model_flag=(--model "$CURSOR_MODEL")
       setsid bash -c 'cd "$1" && shift && exec cursor-agent -p --force --output-format json "$@"' _ "$dir" "${model_flag[@]}" "$prompt" > "$out" 2> "$err" & ;;
@@ -79,6 +92,9 @@ if agent == "comide":
     # The footer comide prints after the turn: "... · $0.0123 · session $0.0123".
     found = re.findall(r"session \$([0-9]+\.[0-9]+)", open(err, errors="replace").read())
     if found: cost = float(found[-1])
+    else:
+        try: cost = float(open(out[:-len(".out")] + ".cost").read().strip().lstrip("$"))
+        except Exception: pass
     print("  response: " + text.strip()[:300].replace("\n", " "))
 else:
     try:
@@ -110,7 +126,7 @@ esac
 [ -d "$POLYGLOT" ] || { echo "polyglot-benchmark not found at $POLYGLOT" >&2; exit 2; }
 echo "  $version"
 mkdir -p "$OUT"; printf '%s\n' "$version" > "$OUT/version"
-export AGENT CURSOR_MODEL WALL
+export AGENT CURSOR_MODEL WALL HIDE_VERIFY
 
 for run in $(seq 1 "$RUNS"); do
   work="$OUT/run-$run"
