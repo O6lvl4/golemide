@@ -160,12 +160,31 @@ fn harness_failure(r: CommandResult) -> String =
   else if r.timed_out then "the command timed out"
   else if r.code == 0 then ""
   else {
-    let head = string.to_lower(string.join(list.take(string.split(r.stdout + "\n" + r.stderr, "\n"), 12), "\n"))
+    let lines = string.split(r.stdout + "\n" + r.stderr, "\n")
+    let head = string.to_lower(string.join(list.take(lines, 12), "\n"))
     var why = ""
     for (re, w) in HARNESS_BROKEN {
       if why == "" then match regex.find(re, head) { some(m) => { why = w + " (" + string.trim(m) + ")" }, none => () } else ()
     }
-    why
+    if why == "" then shell_not_found(r.code, lines) else why
+  }
+
+// 126 and 127 are the shell's own statuses: a command it could not run, or could not
+// find. The complaint is the last thing printed, after everything the chain before it
+// wrote. Measured 2026-09-24 on cpp/clock: verify was `cmake ... && cmake --build build
+// && ./build/clock_tests`, the build (which runs the tests) passed, the program name was
+// a guess and wrong, and golemide spent its six attempts and the 1800 s cap "fixing"
+// code that was already right, because the "No such file or directory" came after
+// 40 lines of build output.
+fn shell_not_found(code: Int, lines: List[String]) -> String =
+  if code != 126 and code != 127 then ""
+  else {
+    let tail = list.filter(list.drop(lines, list.len(lines) - 12), (l) => string.trim(l) != "")
+    let hit = list.find(list.reverse(tail), (l) => regex.is_match("not found|no such file or directory|permission denied|cannot execute", string.to_lower(l)))
+    match hit {
+      some(l) => "the last command in it could not be run (exit " + int.to_string(code) + ": " + string.trim(l) + ")",
+      none => "",
+    }
   }
 
 // Files git considers part of the project (it knows .gitignore); `find`
@@ -296,4 +315,16 @@ test "noise, harness failures, omitted directories" {
   let ok_r = CommandResult { command: "x", code: 1, stdout: "FAILED test_a", stderr: "", timed_out: false, duration_ms: 1, spawn_error: "" }
   assert_eq(harness_failure(ok_r), "")
   assert(string.contains(omitted_by_directory(["a/1", "a/2", "b/3", "c"], ["c"]), "a/ (2)"))
+}
+
+test "a program the shell could not find after a long build is a broken command" {
+  var out: List[String] = []
+  var i = 0
+  while i < 40 { list.push(out, "[ 50%] Building CXX object CMakeFiles/clock.dir/clock.cpp.o"); i = i + 1 }
+  list.push(out, "bash: line 1: ./build/clock_tests: No such file or directory")
+  let r = CommandResult { command: "cmake --build build && ./build/clock_tests", code: 127, stdout: string.join(out, "\n"), stderr: "", timed_out: false, duration_ms: 9000, spawn_error: "" }
+  assert(string.starts_with(harness_failure(r), "the last command in it could not be run (exit 127"))
+  // The same words from a test that failed are the test's business.
+  let failed = CommandResult { command: "pytest", code: 1, stdout: string.join(out, "\n") + "\nFileNotFoundError: No such file or directory: 'x'", stderr: "", timed_out: false, duration_ms: 900, spawn_error: "" }
+  assert_eq(harness_failure(failed), "")
 }
