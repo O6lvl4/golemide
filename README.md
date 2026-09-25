@@ -41,6 +41,29 @@ Choose `--verify` for your project: its exit status decides success. Use
 `./golemide help` for options, or `./golemide llm-test` to check credentials with one model
 call.
 
+### Models
+
+golemide runs on `cf:glm-5.3-flash` and escalates to `cf:glm-5.3` after repeated
+failures. `--model` and `--strong-model` choose others, as `PROVIDER:MODEL`:
+
+| Model | Runs on | Needs |
+|---|---|---|
+| `cf:glm-5.3-flash` (default), `cf:glm-5.3`, … | Cloudflare Workers AI | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` |
+| `openai:…`, `openrouter:…`, `deepseek:…`, `zai:…`, `groq:…` | that OpenAI-compatible service | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, … |
+| `ollama:…`, `lmstudio:…` | a local server | nothing |
+| `NAME:MODEL` | any other OpenAI-compatible service | `NAME_BASE_URL`, `NAME_API_KEY` |
+| `claude`, `claude:sonnet`, … | Claude Code's `claude -p`, on your Claude login | `claude` on `PATH` |
+
+```sh
+./golemide solve "fix clamp" --root ../project --verify "cargo test" \
+  --model claude:sonnet --strong-model claude:opus
+```
+
+Cloudflare's credentials are needed only for a `cf:` model. Cost is Cloudflare's meter,
+a service's own reported cost (OpenRouter), or, for `claude`, what `claude -p` reports;
+for other services it is not known and counts as zero. `claude -p` runs with its tools,
+settings, hooks and MCP servers off, but still reads your global `CLAUDE.md` and memory.
+
 `golemide polish` asks for the same behaviour written more simply, on a project
 whose verification command already passes. A polish that stops it passing is
 rolled back to the version that did.

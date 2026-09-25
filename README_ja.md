@@ -40,6 +40,29 @@ almide build
 `--verify` はプロジェクトに合わせて指定してください。その終了コードが成功を決めます。
 オプションは `./golemide help`、モデルを 1 回呼んで認証を確認するには `./golemide llm-test` を使います。
 
+### モデル
+
+golemide は `cf:glm-5.3-flash` で動き、失敗が続くと `cf:glm-5.3` に切り替えます。
+`--model` と `--strong-model` で、`プロバイダ:モデル` の形で別のモデルを選べます。
+
+| モデル | 動く先 | 必要なもの |
+|---|---|---|
+| `cf:glm-5.3-flash`（既定）、`cf:glm-5.3`、… | Cloudflare Workers AI | `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN` |
+| `openai:…`、`openrouter:…`、`deepseek:…`、`zai:…`、`groq:…` | その OpenAI 互換サービス | `OPENAI_API_KEY`、`OPENROUTER_API_KEY` など |
+| `ollama:…`、`lmstudio:…` | 手元のサーバー | なし |
+| `NAME:MODEL` | それ以外の OpenAI 互換サービス | `NAME_BASE_URL`、`NAME_API_KEY` |
+| `claude`、`claude:sonnet`、… | Claude Code の `claude -p`（Claude のログインで動く） | `PATH` 上の `claude` |
+
+```sh
+./golemide solve "clamp を直す" --root ../project --verify "cargo test" \
+  --model claude:sonnet --strong-model claude:opus
+```
+
+Cloudflare の認証情報が要るのは `cf:` のモデルを使うときだけです。費用は、Cloudflare の計量、
+サービス自身が報告する費用（OpenRouter）、`claude` なら `claude -p` が報告する値を使います。
+それ以外のサービスでは分からないので 0 として数えます。`claude -p` はツール・設定・フック・
+MCP を切って動かしますが、全体設定の `CLAUDE.md` と自動メモリは読まれます。
+
 `golemide polish` は、検証コマンドが**既に通っている**プロジェクトに対して、同じ振る舞いを
 より単純に書き直すよう求めます。通らなくなった場合は、通っていた版に巻き戻します。
 
