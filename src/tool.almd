@@ -50,9 +50,14 @@ effect fn apply_edit(root: String, e0: solve.Edit, reps: List[replace.Replacemen
         ok(a) => (a.0, a.1, ""),
         err(why) => ("", [], why),
       }
-    let degenerate = if rep_error != "" then "" else solve.degenerate_write(root, p, source)!
+    // Every replacement found already made: nothing to write, and nothing wrong. Refused
+    // as "identical to the current file", the caller would go looking for a fault.
+    let all_made = rep_error == "" and not list.is_empty(reps) and source == before
+      and list.len(list.filter(matched, (m) => string.contains(m, "already made"))) == list.len(reps)
+    let degenerate = if rep_error != "" or all_made then "" else solve.degenerate_write(root, p, source)!
     let was = solve.mtime_of(full)!
     if rep_error != "" then refused(1, p, rep_error)
+    else if all_made then EditResult { code: 0, path: p, error: "", bytes: string.len(before), checked_by: "", matched: matched, diff: "" }
     else if degenerate != "" then refused(1, p, degenerate)
     else match gate.write_checked(full, source, true) {
       err(why) => refused(1, p, "refused by the syntax gate: " + why),

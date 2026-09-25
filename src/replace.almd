@@ -186,6 +186,26 @@ fn anchored(block: List[String], want: List[String]) -> Bool = {
   }
 }
 
+// Typographic punctuation a model writes when it re-types code, mapped to the ASCII the
+// code has: curly quotes, the dashes, and the wide and non-breaking spaces. One character
+// for one, so an offset in the mapped text is the same offset in the file. From Codex's
+// apply_patch (openai/codex, `seek_sequence.rs`), which tries this last.
+fn plain_char(c: String) -> String =
+  if c == "\u{2018}" or c == "\u{2019}" or c == "\u{201A}" or c == "\u{201B}" or c == "\u{2032}" then "'"
+  else if c == "\u{201C}" or c == "\u{201D}" or c == "\u{201E}" or c == "\u{201F}" or c == "\u{2033}" then "\""
+  else if c == "\u{2010}" or c == "\u{2011}" or c == "\u{2012}" or c == "\u{2013}" or c == "\u{2014}" or c == "\u{2015}" or c == "\u{2212}" then "-"
+  else if c == "\u{00A0}" or c == "\u{2007}" or c == "\u{202F}" or c == "\u{2002}" or c == "\u{2003}" or c == "\u{2009}" then " "
+  else c
+
+fn plain(s: String) -> String = string.join(list.map(string.chars(s), plain_char), "")
+
+fn plain_punctuation(text: String, needle: String) -> List[Candidate] = {
+  let t = plain(text)
+  let n = plain(needle)
+  if t == text and n == needle then []
+  else list.map(exact(t, n), (c) => Candidate { actual: string.slice(text, c.at, c.at + string.len(n)), at: c.at })
+}
+
 // ---- the ladder ------------------------------------------------------------------
 
 // `by_lines` marks the steps that matched by ignoring the model's indentation: only
@@ -202,6 +222,7 @@ let STEPS: List[Step] = [
   Step { how: "ignoring a uniform indentation change", by_lines: true, run: (t, n) => blocks_where(t, n, 2, same_dedented) },
   Step { how: "ignoring leading and trailing whitespace on each line", by_lines: true, run: (t, n) => blocks_where(t, n, 1, same_trimmed) },
   Step { how: "by its first and last lines, with the middle at least 80% similar", by_lines: true, run: (t, n) => blocks_where(t, n, 3, anchored) },
+  Step { how: "reading typographic quotes, dashes and spaces as plain ones", by_lines: false, run: plain_punctuation },
 ]
 
 fn shown(s: String) -> String = "\"" + string.take(s, 120) + "\""
@@ -302,6 +323,8 @@ fn not_found(text: String, old: String) -> String = {
     + (if hint == "" then "" else "\n" + hint)
 }
 
+fn line_of(text: String, at: Int) -> Int = list.len(string.split(string.take(text, at), "\n"))
+
 // Where `old` is in `text`, or why it is not. The first step with any candidate
 // decides: one is the match, several is a refusal. A later step is never consulted to
 // break a tie, because a broader reading of the same text cannot make it less ambiguous.
@@ -314,7 +337,8 @@ fn find(text: String, old: String) -> Result[Found, String] = {
       let cs = step.run(text, old)
       if list.len(cs) == 1 then { let c = list.first(cs) ?? Candidate { actual: old, at: 0 }; out = ok(Found { actual: c.actual, at: c.at, how: step.how, by_lines: step.by_lines }); settled = true }
       else if list.len(cs) > 1 then {
-        out = err("this text appears more than once" + (if step.how == "" then "" else " (" + step.how + ")") + ", so it does not say which one to change — include enough surrounding lines to make it unique: " + shown(old))
+        let at_lines = list.map(list.take(cs, 8), (c) => int.to_string(line_of(text, c.at)))
+        out = err("this text appears " + int.to_string(list.len(cs)) + " times (at lines " + string.join(at_lines, ", ") + (if list.len(cs) > 8 then ", …" else "") + ")" + (if step.how == "" then "" else " (" + step.how + ")") + ", so it does not say which one to change — include enough surrounding lines to make it unique: " + shown(old))
         settled = true
       } else ()
     }
@@ -333,22 +357,60 @@ fn reindent(new: String, old: String, actual: String) -> String = {
     else to + (string.strip_prefix(l, from) ?? l)), "\n")
 }
 
+// ---- before and after the search -------------------------------------------------
+
+// A line in `new` that stands for code instead of being it: "// ... existing code ...",
+// "# rest unchanged". `new` replaces `old` whole, so the placeholder would replace the
+// code it stands for with a comment. From Gemini CLI's edit tool, which refuses the same.
+let PLACEHOLDER = "^(//|#|--|;|/\\*+|\\*|<!--)\\s*(\\.\\.\\.|…|\\[\\.\\.\\.)|^(//|#|--|/\\*+|<!--).*(existing code|rest of (the )?(code|file|function|method|class|implementation)|remains? (the same|unchanged)|unchanged (code|below|above)|same as before)"
+
+fn placeholder_in(new: String, old: String) -> String = {
+  let olds = list.map(string.split(old, "\n"), (l) => string.trim(l))
+  let hits = list.filter(string.split(new, "\n"), (l) => {
+    let t = string.trim(l)
+    regex.is_match(PLACEHOLDER, string.to_lower(t)) and not list.contains(olds, t)
+  })
+  string.trim(list.first(hits) ?? "")
+}
+
+// A replacement whose `old` is gone and whose `new` is there, once and not trivially:
+// the edit was made already, most often by the caller's own earlier call. Refusing it
+// sends the caller looking for text that no longer exists. From Aider's "the REPLACE
+// lines are already in the file".
+let ALREADY_MIN_CHARS = 20
+
+fn already_applied(text: String, r: Replacement) -> Bool = {
+  let new = string.trim(normalize_newlines(r.new))
+  string.len(new) >= ALREADY_MIN_CHARS and not string.contains(normalize_newlines(r.old), new)
+    and list.len(exact(text, new)) == 1
+}
+
+// Which replacement of a batch a refusal is about, and that nothing was written.
+fn in_batch(e: String, n: Int, total: Int) -> String =
+  if total <= 1 then e
+  else "replacement " + int.to_string(n) + " of " + int.to_string(total) + ": " + e
+    + "\n(none of the " + int.to_string(total) + " replacements was written: send them all again with this one corrected)"
+
 // Replacements are applied in order, each against the result of the last, so a later
 // one may target text an earlier one introduced. The first failure stops the batch and
 // reports; a file is never left half-edited. The notes say which replacements needed a
-// loosened match and how, so the log can say so.
+// loosened match and how, and which were found already made, so the log can say so.
 fn apply(current: String, reps: List[Replacement]) -> Result[(String, List[String]), String] = {
   let crlf = string.contains(current, "\r\n")
   var text = normalize_newlines(current)
   var notes: List[String] = []
   var failure = ""
   var n = 0
+  let total = list.len(reps)
   for r in reps {
     n = n + 1
+    let stand_in = placeholder_in(r.new, r.old)
     if failure != "" then ()
-    else if r.old == "" then failure = "a replacement had an empty `old`; it must be the exact text to find"
+    else if r.old == "" then failure = in_batch("a replacement had an empty `old`; it must be the exact text to find", n, total)
+    else if stand_in != "" then failure = in_batch("`new` has a placeholder line, " + shown(stand_in) + ": `new` replaces `old` whole, so the code that line stands for would be deleted. Write that code out, or make `old` smaller so `new` needs no placeholder.", n, total)
     else match find(text, normalize_newlines(r.old)) {
-      err(e) => { failure = e },
+      err(e) => if already_applied(text, r) then list.push(notes, "replacement " + int.to_string(n) + " was already made: its `old` is not in the file and its `new` is, so it was skipped")
+        else { failure = in_batch(e, n, total) },
       ok(f) => {
         if f.how != "" then list.push(notes, "replacement " + int.to_string(n) + " matched " + f.how) else ()
         let new = if f.by_lines then reindent(normalize_newlines(r.new), normalize_newlines(r.old), f.actual) else normalize_newlines(r.new)
@@ -394,7 +456,7 @@ test "replacements apply when unique, and are refused when they are not" {
 
   // Ambiguous: `= 1` is on two lines, so the model has not said which it meant. Refused
   // rather than guessed -- guessing here silently edits the wrong line.
-  assert(string.contains(failure_of(apply(file, [Replacement { old: "-> Int = 1", new: "-> Int = 7" }])), "more than once"))
+  assert(string.contains(failure_of(apply(file, [Replacement { old: "-> Int = 1", new: "-> Int = 7" }])), "times (at lines"))
 
   // Not present at all: usually a quote from memory rather than from the file.
   assert(string.contains(failure_of(apply(file, [Replacement { old: "fn zzz()", new: "x" }])), "could not find this text"))
@@ -446,11 +508,11 @@ test "a match that is not exact is found on the ladder, and says which rung" {
 
   // A loosened step that finds the text twice refuses, like an exact one would.
   let twice = "  a = 1\n  b = 2\n    a = 1\n    b = 2\n"
-  assert(string.contains(failure_of(apply(twice, [Replacement { old: "a = 1\nb = 2", new: "z" }])), "more than once"))
+  assert(string.contains(failure_of(apply(twice, [Replacement { old: "a = 1\nb = 2", new: "z" }])), "times (at lines"))
 
   // Ambiguity is decided by the rung that found it: a broader rung is not consulted.
   let dup = "x = 1\nx = 1\n"
-  assert(string.contains(failure_of(apply(dup, [Replacement { old: "x = 1", new: "y" }])), "more than once"))
+  assert(string.contains(failure_of(apply(dup, [Replacement { old: "x = 1", new: "y" }])), "times (at lines"))
 }
 
 test "line endings are matched through and written back" {
@@ -501,4 +563,44 @@ test "levenshtein, for the path suggestions and the anchored middle" {
   assert(similarity("return 1", "return 1") == 1.0)
   assert(similarity("return 1", "return 12") > 0.8)
   assert(similarity("abc", "xyz") == 0.0)
+}
+
+test "a quote that differs from the file only in typographic punctuation is found" {
+  let file = "msg = \"it's done - really\"\nx = 1\n"
+  let r = apply(file, [Replacement { old: "msg = \u{201C}it\u{2019}s done \u{2014} really\u{201D}", new: "msg = \"done\"" }])
+  assert_eq(applied(r), "msg = \"done\"\nx = 1\n")
+  assert(string.contains(string.join(notes_of(r), " "), "typographic"))
+}
+
+test "an ambiguous quote names the lines it was found at" {
+  let file = "a = 1\nb = 2\na = 1\n"
+  assert(string.contains(failure_of(apply(file, [Replacement { old: "a = 1", new: "a = 3" }])), "appears 2 times (at lines 1, 3)"))
+}
+
+test "an edit made already is skipped, not refused" {
+  let file = "fn total(xs) {\n  return sum(xs) / max(1, len(xs))\n}\n"
+  let again = Replacement { old: "  return sum(xs) / len(xs)", new: "  return sum(xs) / max(1, len(xs))" }
+  let r = apply(file, [again])
+  assert_eq(applied(r), file)
+  assert(string.contains(string.join(notes_of(r), " "), "already made"))
+  // A short `new` found somewhere proves nothing.
+  assert(string.contains(failure_of(apply("x = 1\ny = 2\n", [Replacement { old: "x = 9", new: "y = 2" }])), "could not find"))
+}
+
+test "a placeholder standing in for code is refused, and code that has one is not" {
+  let file = "def f():\n    a = 1\n    b = 2\n    return a + b\n"
+  let lazy = Replacement { old: "def f():\n    a = 1\n    b = 2\n    return a + b", new: "def f():\n    # ... rest of the code unchanged\n    return a * b" }
+  let why = failure_of(apply(file, [lazy]))
+  assert(string.contains(why, "placeholder"))
+  assert(string.contains(failure_of(apply(file, [Replacement { old: "return a + b", new: "// ... existing code ...\nreturn 0" }])), "placeholder"))
+  // The same comment already in `old` is the file's own, not a stand-in.
+  let own = "x = 1\n# ... and so on\ny = 2\n"
+  assert_eq(applied(apply(own, [Replacement { old: "# ... and so on\ny = 2", new: "# ... and so on\ny = 3" }])), "x = 1\n# ... and so on\ny = 3\n")
+}
+
+test "a refusal in a batch says which replacement, and that none was written" {
+  let file = "a = 1\nb = 2\n"
+  let why = failure_of(apply(file, [Replacement { old: "a = 1", new: "a = 5" }, Replacement { old: "c = 3", new: "c = 4" }]))
+  assert(string.starts_with(why, "replacement 2 of 2: could not find"))
+  assert(string.contains(why, "none of the 2 replacements was written"))
 }
