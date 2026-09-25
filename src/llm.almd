@@ -13,6 +13,7 @@
 
 import env
 import almai.live as live
+import almai.core as core
 
 type Request = { prompt: String, system: String, model: String, max_output_tokens: Int, reasoning_effort: String, schema: Value? }
 // `hedged` says a second, identical request was started because the first was
@@ -83,7 +84,7 @@ fn transport_error(code: Int, said: String) -> String =
 
 // Turn an answer into the response the loop uses, or the error it must see.
 fn settle(r: live.Reply, hedged: Bool, won_by_hedge: Bool) -> Result[Response, String] =
-  if r.finish == "length" and string.trim(r.content) == "" then {
+  if r.finish == core.FinishLength and string.trim(r.content) == "" then {
     // The advice differs by cause, and the wrong advice was being given for the more
     // common cause: when reasoning consumed the budget, a larger budget is the weaker
     // lever, because the reasoning takes the extra room as well.
@@ -92,7 +93,7 @@ fn settle(r: live.Reply, hedged: Bool, won_by_hedge: Bool) -> Result[Response, S
     let advice = if reasoned then "; spend less on reasoning" else "; raise max_completion_tokens"
     err("truncated before any content (finish_reason=length" + cause + ")" + advice)
   }
-  else ok(Response { text: r.content, cost_usd: r.cost_usd, input_tokens: r.input_tokens, output_tokens: r.output_tokens,
+  else ok(Response { text: r.content, cost_usd: r.cost.usd, input_tokens: core.count(r.usage.input), output_tokens: core.count(r.usage.output),
     duration_ms: r.ms, hedged: hedged, won_by_hedge: won_by_hedge })
 
 // Cloudflare takes reasoning_effort for every model it serves; elsewhere it is an
@@ -108,14 +109,18 @@ fn messages_of(req: Request) -> List[Value] =
 // and the first answer to land is the one used.
 effect fn invoke(creds: Credentials, req: Request) -> Result[Response, String] = {
   let _ = creds
-  let ran = live.run(live.Request { model: req.model, messages: messages_of(req), max_tokens: req.max_output_tokens,
+  // ask.almd classifies the error's words, so the typed error goes back as its text.
+  match live.run(live.Request { model: req.model, messages: messages_of(req), max_tokens: req.max_output_tokens,
       effort: effort_for(req.model, req.reasoning_effort), schema: req.schema },
-    live.Limits { total_s: TOTAL_TIMEOUT_S, idle_s: IDLE_TIMEOUT_S }, hedge_after_ms()!, call_max_ms()!)!
-  settle(ran.reply, ran.hedged, ran.won_by_hedge)
+    live.Limits { total_s: TOTAL_TIMEOUT_S, idle_s: IDLE_TIMEOUT_S }, hedge_after_ms()!, call_max_ms()!) {
+    ok(ran) => settle(ran.reply, ran.hedged, ran.won_by_hedge),
+    err(e) => err(core.error_text(e)),
+  }
 }
 
 fn reply(content: String, reasoning: String, finish: String) -> live.Reply =
-  live.Reply { content: content, reasoning: reasoning, calls: [], finish: finish, cost_usd: 0.0, input_tokens: 10, cached_tokens: 0, output_tokens: 2, ms: 5 }
+  live.Reply { content: content, reasoning: reasoning, calls: [], finish: core.finish_of(finish), raw_finish: finish,
+    usage: core.Usage { input: some(10), cache_read: none, cache_write: none, output: some(2), reasoning: none }, cost: core.no_cost(), warnings: [], ms: 5 }
 
 test "a length finish with no content names the remedy its cause actually calls for" {
   // Reasoning ate the budget: a bigger budget feeds the reasoning, so the remedy is to
