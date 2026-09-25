@@ -147,8 +147,8 @@ effect fn solve_with(a: Args, task: String, root: String, quiet: Bool, polish_on
   // Cloudflare's credentials only matter for a cf: model. Both models are looked up
   // before anything runs, so a missing key is one line and not a failed attempt.
   let creds = llm.credentials_from_env()! ?? llm.NO_CREDENTIALS
-  let _ = llm.endpoint_of(creds, map.get(a.flags, "model") ?? ask.MODEL_WORK)!
-  let _ = llm.endpoint_of(creds, map.get(a.flags, "strong-model") ?? ask.MODEL_STRONG)!
+  llm.check_model(map.get(a.flags, "model") ?? ask.MODEL_WORK)!
+  llm.check_model(map.get(a.flags, "strong-model") ?? ask.MODEL_STRONG)!
   let (rm, rmw) = repo_map(root, task)!
   let verify_timeout_ms = (int.parse(map.get(a.flags, "timeout") ?? "120") ?? 120) * 1000
   let obs = observe.observe(root, map.get(a.flags, "verify") ?? "", int.parse(map.get(a.flags, "files-seen") ?? "400") ?? 400,
