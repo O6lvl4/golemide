@@ -1,4 +1,14 @@
-// The model call, spoken directly to Cloudflare Workers AI.
+// The model call, spoken to one of three kinds of endpoint, named by the model id:
+//
+//   cf:MODEL          Cloudflare Workers AI (CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN)
+//   NAME:MODEL        any OpenAI-compatible chat-completions service: NAME_BASE_URL and
+//                     NAME_API_KEY (upper-cased NAME). openai, openrouter, deepseek, zai,
+//                     groq, ollama and lmstudio have the base URL built in; ollama and
+//                     lmstudio need no key.
+//   claude[:MODEL]    Claude Code's `claude -p`, its tools off, the answer through
+//                     --json-schema: one prompt, one answer, no session kept
+//
+// The same scheme as comide's src/model.almd, so one model id means the same in both.
 //
 // Everything famulus5 measured is kept:
 //   - streamed, always: a non-streamed request past ~4 minutes is ended
@@ -46,6 +56,63 @@ fn price_of(model: String) -> Price? = {
 
 type Credentials = { account_id: String, token: String, email: String, key: String }
 
+// No Cloudflare credentials: enough for a run on any other provider.
+let NO_CREDENTIALS = Credentials { account_id: "", token: "", email: "", key: "" }
+
+// `kind` is "chat" (an OpenAI-compatible endpoint) or "claude". `headers` carry the
+// credentials, and so are only ever written to curl's config file.
+type Endpoint = { kind: String, provider: String, url: String, headers: List[String], model_id: String }
+
+// The part before the first colon; a bare name, or an @cf/ id, is Cloudflare's.
+fn provider_of(model: String) -> String =
+  if model == "claude" then "claude"
+  else if string.starts_with(model, "@cf/") then "cf"
+  else match string.split_once(model, ":") {
+    some((p, _)) => string.to_lower(p),
+    none => "cf",
+  }
+
+fn model_part(model: String) -> String = match string.split_once(model, ":") {
+  some((_, m)) => m,
+  none => "",
+}
+
+fn known_base(provider: String) -> String =
+  if provider == "openai" then "https://api.openai.com/v1"
+  else if provider == "openrouter" then "https://openrouter.ai/api/v1"
+  else if provider == "deepseek" then "https://api.deepseek.com/v1"
+  else if provider == "zai" then "https://api.z.ai/api/paas/v4"
+  else if provider == "groq" then "https://api.groq.com/openai/v1"
+  else if provider == "ollama" then "http://localhost:11434/v1"
+  else if provider == "lmstudio" then "http://localhost:1234/v1"
+  else ""
+
+fn keyless(provider: String) -> Bool = provider == "ollama" or provider == "lmstudio"
+
+fn env_name(provider: String) -> String = string.to_upper(string.replace(provider, "-", "_"))
+
+effect fn endpoint_of(creds: Credentials, model: String) -> Result[Endpoint, String] = {
+  let provider = provider_of(model)
+  if provider == "claude" then ok(Endpoint { kind: "claude", provider: "claude", url: "", headers: [], model_id: model_part(model) })
+  else if provider == "cf" then
+    if creds.account_id == "" then err("no Cloudflare credentials for " + model + ": put CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in .env or the environment")
+    else ok(Endpoint { kind: "chat", provider: "cf", url: endpoint_for(creds.account_id),
+      headers: if creds.token != "" then ["Authorization: Bearer " + creds.token] else ["X-Auth-Email: " + creds.email, "X-Auth-Key: " + creds.key],
+      model_id: cf_id_of(model) })
+  else {
+    let name = env_name(provider)
+    let base = string.trim(env.get(name + "_BASE_URL") ?? "")
+    let url_base = if base != "" then base else known_base(provider)
+    let key = string.trim(env.get(name + "_API_KEY") ?? "")
+    if url_base == "" then err("unknown provider " + provider + ": set " + name + "_BASE_URL (and " + name + "_API_KEY) to an OpenAI-compatible endpoint")
+    else if key == "" and not keyless(provider) then err("no " + name + "_API_KEY for " + model)
+    else ok(Endpoint { kind: "chat", provider: provider,
+      url: (string.strip_suffix(url_base, "/") ?? url_base) + "/chat/completions",
+      headers: if key == "" then [] else ["Authorization: Bearer " + key],
+      model_id: model_part(model) })
+  }
+}
+
 // A scoped token wins over a Global API Key when both are set. None when
 // nothing usable is in the environment (values are never printed).
 effect fn credentials_from_env() -> Credentials? = {
@@ -66,17 +133,23 @@ type Request = { prompt: String, system: String, model: String, max_output_token
 // told from the outside.
 type Response = { text: String, cost_usd: Float, input_tokens: Int, output_tokens: Int, duration_ms: Int, hedged: Bool, won_by_hedge: Bool }
 
-fn build_body(req: Request) -> String = {
+// Cloudflare takes reasoning_effort for every model it serves; elsewhere it is an error
+// on a model that does not reason, so it goes to Cloudflare only. OpenAI wants
+// max_completion_tokens; the other services read max_tokens.
+fn build_body(req: Request, ep: Endpoint) -> String = {
   var messages: List[Value] = []
   if req.system != "" then list.push(messages, value.object([("role", value.str("system")), ("content", value.str(req.system))])) else ()
   list.push(messages, value.object([("role", value.str("user")), ("content", value.str(req.prompt))]))
   var fields: List[(String, Value)] = [
-    ("model", value.str(cf_id_of(req.model))),
+    ("model", value.str(ep.model_id)),
     ("messages", value.array(messages)),
     ("stream", value.bool(true)),
-    ("max_completion_tokens", value.int(req.max_output_tokens)),
-    ("reasoning_effort", value.str(req.reasoning_effort)),
   ]
+  if ep.provider == "cf" or ep.provider == "openai" then list.push(fields, ("max_completion_tokens", value.int(req.max_output_tokens)))
+  else list.push(fields, ("max_tokens", value.int(req.max_output_tokens)))
+  if ep.provider == "cf" then list.push(fields, ("reasoning_effort", value.str(req.reasoning_effort)))
+  else list.push(fields, ("stream_options", value.object([("include_usage", value.bool(true))])))
+  if ep.provider == "openrouter" then list.push(fields, ("usage", value.object([("include", value.bool(true))]))) else ()
   match req.schema {
     some(s) => list.push(fields, ("response_format", value.object([
       ("type", value.str("json_schema")),
@@ -192,7 +265,9 @@ fn settle(c: Completion, model: String, duration_ms: Int, hedged: Bool, won_by_h
     let completion_tokens = if num(c.usage, "completion_tokens") > 0 then num(c.usage, "completion_tokens") else num(c.usage, "output_tokens")
     let input_tokens = int.max(0, prompt_tokens - cached)
     let neurons = option.map(c.usage, (u) => json.get_float(u, "neurons") ?? float.from_int(json.get_int(u, "neurons") ?? -1)) ?? -1.0
+    let reported = option.map(c.usage, (u) => json.get_float(u, "cost") ?? -1.0) ?? -1.0
     let cost = if neurons >= 0.0 then neurons * NEURON_USD
+      else if reported >= 0.0 then reported
       else match price_of(model) {
         some(p) => (float.from_int(input_tokens) * p.input + float.from_int(cached) * p.cached + float.from_int(completion_tokens) * p.output) / 1000000.0,
         none => 0.0,
@@ -222,17 +297,13 @@ fn endpoint_for(account_id: String) -> String =
 //
 // A config file rather than arguments: the token would otherwise sit in the
 // process list for anyone running `ps`.
-fn curl_config(creds: Credentials, body_path: String, sse_path: String) -> String = {
+fn curl_config(ep: Endpoint, body_path: String, sse_path: String) -> String = {
   var lines = [
-    "url = " + quoted(endpoint_for(creds.account_id)),
+    "url = " + quoted(ep.url),
     "request = \"POST\"",
     "header = \"Content-Type: application/json\"",
   ]
-  if creds.token != "" then list.push(lines, "header = " + quoted("Authorization: Bearer " + creds.token))
-  else {
-    list.push(lines, "header = " + quoted("X-Auth-Email: " + creds.email))
-    list.push(lines, "header = " + quoted("X-Auth-Key: " + creds.key))
-  }
+  for h in ep.headers { list.push(lines, "header = " + quoted(h)) }
   list.push(lines, "data = " + quoted("@" + body_path))
   list.push(lines, "output = " + quoted(sse_path))
   list.push(lines, "max-time = " + int.to_string(TOTAL_TIMEOUT_S))
@@ -289,7 +360,9 @@ let POLL_MS = 250
 
 // One curl, detached. Its stream, its status line and its errors all go to
 // files: a spawned child holding the pipes makes the deadline unenforceable.
-type Call = { pid: Int, sse: String, cfg: String, out: String, err: String, pid_file: String }
+// A claude -p call runs the same way: its JSON goes where the stream would, and the
+// shell writes "200" and the exit status as curl's write-out would.
+type Call = { pid: Int, sse: String, cfg: String, out: String, err: String, pid_file: String, kind: String }
 
 // curl's stdout is `%{http_code}` with no newline; the shell appends the exit
 // status on its own line once curl has actually finished. Nothing else writes
@@ -305,22 +378,55 @@ fn call_result(out: String) -> (Int, Int)? = {
   }
 }
 
-effect fn start_call(creds: Credentials, body_path: String) -> Result[Call, String] = {
+fn sh_quote(s: String) -> String = observe.shell_quote(s)
+
+// claude -p as a model and nothing more: no tools, no settings, hooks or MCP servers of
+// the person's, no session kept, run from the temp directory so no project file of the
+// person's is read as memory. The prompt comes on stdin.
+fn claude_command(ep: Endpoint, system_path: String, schema: Value?) -> String = {
+  var args = ["claude", "-p", "--output-format", "json", "--tools", "", "--setting-sources", "", "--strict-mcp-config",
+    "--no-session-persistence", "--system-prompt-file", system_path]
+  match schema { some(sc) => { args = args + ["--json-schema", json.stringify(sc)] }, none => () }
+  if ep.model_id != "" then { args = args + ["--model", ep.model_id] } else ()
+  "cd \"$" + "{TMPDIR:-/tmp}\" && " + string.join(list.map(args, sh_quote), " ")
+}
+
+// claude -p --output-format json prints one object: the answer in structured_output
+// (or result, without a schema), or is_error with what went wrong in result.
+fn claude_response(out: String, code: Int, said: String, duration_ms: Int) -> Result[Response, String] =
+  match json.parse(string.trim(out)) {
+    err(_) => err(if code == 127 then "claude is not installed (no `claude` on PATH)"
+      else "claude exit " + int.to_string(code) + ": " + string.take(if said == "" then string.trim(out) else said, 300)),
+    ok(r) => if json.get_bool(r, "is_error") ?? false then err("claude: " + string.take((json.get_string(r, "result") ?? "") + " " + (json.get_string(r, "subtype") ?? ""), 300))
+      else {
+        let text = match value.field(r, "structured_output") { ok(so) => json.stringify(so), err(_) => json.get_string(r, "result") ?? "" }
+        let usage = ok_of(value.field(r, "usage"))
+        ok(Response { text: text, cost_usd: json.get_float(r, "total_cost_usd") ?? 0.0,
+          input_tokens: num(usage, "input_tokens") + num(usage, "cache_creation_input_tokens"), output_tokens: num(usage, "output_tokens"),
+          duration_ms: duration_ms, hedged: false, won_by_hedge: false })
+      },
+  }
+
+effect fn start_call(ep: Endpoint, body_path: String, claude_cmd: String) -> Result[Call, String] = {
   let sse_path = fs.create_temp_file("golemide-sse") |> result.map_err((e) => "temp file: " + e)!
   let cfg_path = fs.create_temp_file("golemide-cfg") |> result.map_err((e) => "temp file: " + e)!
   let out_path = fs.create_temp_file("golemide-out") |> result.map_err((e) => "temp file: " + e)!
   let err_path = fs.create_temp_file("golemide-err") |> result.map_err((e) => "temp file: " + e)!
-  fs.write(cfg_path, curl_config(creds, body_path, sse_path)) |> result.map_err((e) => "write config: " + e)!
+  if ep.kind == "claude" then () else { fs.write(cfg_path, curl_config(ep, body_path, sse_path)) |> result.map_err((e) => "write config: " + e)! }
   let pid_path = fs.create_temp_file("golemide-pid") |> result.map_err((e) => "temp file: " + e)!
   // curl runs in the background so its own pid can be recorded: killing the
   // shell alone would leave the request running as an orphan, still streaming
   // and still billed. `wait` makes $? curl's exit status, not the shell's.
-  let script = "curl --config " + observe.shell_quote(cfg_path)
-    + " > " + observe.shell_quote(out_path) + " 2> " + observe.shell_quote(err_path)
-    + " & c=$!; echo $c > " + observe.shell_quote(pid_path) + "; wait $c"
-    + "; printf '\\n%s\\n' \"$?\" >> " + observe.shell_quote(out_path)
+  let script = if ep.kind == "claude" then
+      "(" + claude_cmd + ") < " + sh_quote(body_path) + " > " + sh_quote(sse_path) + " 2> " + sh_quote(err_path)
+        + " & c=$!; echo $c > " + sh_quote(pid_path) + "; wait $c"
+        + "; printf '200\\n%s\\n' \"$?\" > " + sh_quote(out_path)
+    else "curl --config " + observe.shell_quote(cfg_path)
+      + " > " + observe.shell_quote(out_path) + " 2> " + observe.shell_quote(err_path)
+      + " & c=$!; echo $c > " + observe.shell_quote(pid_path) + "; wait $c"
+      + "; printf '\\n%s\\n' \"$?\" >> " + observe.shell_quote(out_path)
   let pid = process.spawn("sh", ["-c", script]) |> result.map_err((e) => "spawn: " + e)!
-  ok(Call { pid: pid, sse: sse_path, cfg: cfg_path, out: out_path, err: err_path, pid_file: pid_path })
+  ok(Call { pid: pid, sse: sse_path, cfg: cfg_path, out: out_path, err: err_path, pid_file: pid_path, kind: ep.kind })
 }
 
 effect fn discard(c: Call) -> Unit = {
@@ -344,7 +450,8 @@ effect fn reap(c: Call, req: Request, t0: Int, hedged: Bool, won_by_hedge: Bool)
   let sse = fs.read_text(c.sse) ?? ""
   let said = string.trim(fs.read_text(c.err) ?? "")
   discard(c)!
-  if code != 0 then err(transport_error(code, said))
+  if c.kind == "claude" then claude_response(sse, code, said, env.millis() - t0)
+  else if code != 0 then err(transport_error(code, said))
   else if status < 200 or status >= 300 then err("status " + int.to_string(status) + ": " + string.take(string.trim(sse), 500))
   else match fold_body(sse) {
     err(e) => err(e),
@@ -358,13 +465,23 @@ effect fn is_done(c: Call) -> Bool = option.is_some(call_result(fs.read_text(c.o
 // and the first answer to land is the one used.
 effect fn invoke(creds: Credentials, req: Request) -> Result[Response, String] = {
   let t0 = env.millis()
+  let ep = endpoint_of(creds, req.model)!
   let body_path = fs.create_temp_file("golemide-req") |> result.map_err((e) => "temp file: " + e)!
-  fs.write(body_path, build_body(req)) |> result.map_err((e) => "write request: " + e)!
+  // claude -p takes the prompt itself on stdin and the system prompt from a file; an
+  // empty one would leave Claude Code's own in place.
+  let system_path = if ep.kind == "claude" then fs.create_temp_file("golemide-sys") |> result.map_err((e) => "temp file: " + e)! else ""
+  if ep.kind == "claude" then {
+    fs.write(body_path, req.prompt) |> result.map_err((e) => "write request: " + e)!
+    fs.write(system_path, if req.system == "" then "Answer the request exactly as asked." else req.system) |> result.map_err((e) => "write request: " + e)!
+  } else { fs.write(body_path, build_body(req, ep)) |> result.map_err((e) => "write request: " + e)! }
+  let claude_cmd = if ep.kind == "claude" then claude_command(ep, system_path, req.schema) else ""
   let cap = call_max_ms()!
   let hard = (TOTAL_TIMEOUT_S + 30) * 1000
   let deadline = effective_deadline(cap, hard)
-  let hedge_at = hedge_after_ms()!
-  let first = start_call(creds, body_path)!
+  // No hedge for claude -p: a second copy of a slow answer only spends the same
+  // subscription's rate limit twice.
+  let hedge_at = if ep.kind == "claude" then 0 else hedge_after_ms()!
+  let first = start_call(ep, body_path, claude_cmd)!
   var second: Call? = none
   var winner: Call? = none
   var timed_out = false
@@ -373,13 +490,14 @@ effect fn invoke(creds: Credentials, req: Request) -> Result[Response, String] =
     if is_done(first)! then winner = some(first)
     else match second {
       some(s) => if is_done(s)! then winner = some(s) else (),
-      none => if hedge_at > 0 and waited > hedge_at then second = some(start_call(creds, body_path)!) else (),
+      none => if hedge_at > 0 and waited > hedge_at then second = some(start_call(ep, body_path, claude_cmd)!) else (),
     }
     if option.is_none(winner) then {
       if waited > deadline then timed_out = true else env.sleep_ms(POLL_MS)
     } else ()
   }
   let _ = fs.remove(body_path)
+  if system_path != "" then { let _ = fs.remove(system_path); () } else ()
   match winner {
     none => {
       discard(first)!
@@ -444,7 +562,8 @@ test "model ids and the request body" {
   assert_eq(cf_id_of("cf:glm-5.3"), "@cf/zai-org/glm-5.3")
   assert_eq(cf_id_of("@cf/x/y"), "@cf/x/y")
   assert_eq(cf_id_of("other"), "@cf/other")
-  let body = build_body(Request { prompt: "hi", system: "sys", model: "cf:glm-5.3-flash", max_output_tokens: 10, reasoning_effort: "low", schema: none })
+  let body = build_body(Request { prompt: "hi", system: "sys", model: "cf:glm-5.3-flash", max_output_tokens: 10, reasoning_effort: "low", schema: none },
+    Endpoint { kind: "chat", provider: "cf", url: "", headers: [], model_id: cf_id_of("cf:glm-5.3-flash") })
   assert(string.contains(body, "\"stream\":true"))
   assert(string.contains(body, "\"role\":\"system\""))
 }
@@ -466,7 +585,7 @@ test "discarding a call stops the work it spawned, not only its shell" {
   // `sink` is deliberately not one of the paths discard removes: the child
   // recreates it on the next append, which would hide the very thing measured.
   let scratch = fs.create_temp_file("golemide-test-scratch")!
-  discard(Call { pid: shell_pid, sse: scratch, cfg: scratch, out: scratch, err: scratch, pid_file: pid_file })!
+  discard(Call { pid: shell_pid, sse: scratch, cfg: scratch, out: scratch, err: scratch, pid_file: pid_file, kind: "chat" })!
   env.sleep_ms(400)
   let just_after = string.len(fs.read_text(sink) ?? "")
   env.sleep_ms(400)
@@ -478,4 +597,28 @@ test "the wall-clock cap narrows the deadline and never widens it" {
   assert_eq(effective_deadline(360000, 1830000), 360000)
   assert_eq(effective_deadline(0, 1830000), 1830000)
   assert_eq(effective_deadline(9000000, 1830000), 1830000)
+}
+
+test "a model id says its provider, and each service gets the fields it reads" {
+  assert_eq(provider_of("cf:glm-5.3-flash"), "cf")
+  assert_eq(provider_of("glm-5.3"), "cf")
+  assert_eq(provider_of("claude"), "claude")
+  assert_eq(provider_of("claude:haiku"), "claude")
+  assert_eq(model_part("ollama:qwen3:8b"), "qwen3:8b")
+  let req = Request { prompt: "p", system: "", model: "m", max_output_tokens: 10, reasoning_effort: "low", schema: none }
+  let ep = (p: String) => Endpoint { kind: "chat", provider: p, url: "", headers: [], model_id: "m" }
+  assert(string.contains(build_body(req, ep("cf")), "\"reasoning_effort\":\"low\""))
+  let oa = build_body(req, ep("openai"))
+  assert(not string.contains(oa, "reasoning_effort") and string.contains(oa, "max_completion_tokens") and string.contains(oa, "include_usage"))
+  assert(string.contains(build_body(req, ep("groq")), "\"max_tokens\":10"))
+}
+
+test "claude -p's answer is its structured output, its failure an error" {
+  let ok_out = "{\"is_error\":false,\"total_cost_usd\":0.02,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":900,\"output_tokens\":50},\"structured_output\":{\"edits\":[]}}"
+  match claude_response(ok_out, 0, "", 1200) {
+    ok(r) => { assert_eq(r.text, "{\"edits\":[]}"); assert_eq(r.input_tokens, 903) },
+    err(e) => assert_eq(e, ""),
+  }
+  assert(result.is_err(claude_response("{\"is_error\":true,\"result\":\"Not logged in\"}", 1, "", 10)))
+  assert(result.is_err(claude_response("", 127, "sh: claude: not found", 10)))
 }

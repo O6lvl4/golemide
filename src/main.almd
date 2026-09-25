@@ -39,7 +39,10 @@ Options
   --verify CMD    the command whose exit status defines success; given one, nothing is guessed
   --attempts N    edit/verify rounds before giving up (default 6)
   --files N       files read per attempt (default 6)
-  --model M       model id (default cf:glm-5.3-flash)
+  --model M       model id, PROVIDER:MODEL (default cf:glm-5.3-flash): cf:... Cloudflare;
+                  openai:, openrouter:, deepseek:, zai:, groq:, ollama:, lmstudio:, or any
+                  NAME: with NAME_BASE_URL and NAME_API_KEY, OpenAI-compatible; claude or
+                  claude:MODEL, Claude Code's claude -p
   --strong-model M  where repeated unusable or identical failures escalate to (default cf:glm-5.3);
                   set it to --model to keep a run on one model
   --create       allow creating files that do not exist
@@ -95,7 +98,7 @@ effect fn repo_map(root: String, task: String) -> (String, List[String]) =
 // not the default one.
 effect fn llm_test(a: Args) -> Result[Unit, String] = {
   load_env(".")!
-  let creds = llm.credentials_from_env()! |> option.to_result("no credentials: set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN")!
+  let creds = llm.credentials_from_env()! ?? llm.NO_CREDENTIALS
   let r = llm.invoke(creds, llm.Request { prompt: "Reply with exactly the word OK.", system: "", model: map.get(a.flags, "model") ?? ask.MODEL_WORK, max_output_tokens: 64, reasoning_effort: "low", schema: none })!
   println("text=" + string.trim(r.text) + " in=" + int.to_string(r.input_tokens) + " out=" + int.to_string(r.output_tokens) + " cost=" + report.usd(r.cost_usd) + " ms=" + int.to_string(r.duration_ms))
   ok(())
@@ -141,7 +144,11 @@ effect fn run_polish(a: Args) -> Result[Int, String] = {
 
 effect fn solve_with(a: Args, task: String, root: String, quiet: Bool, polish_only: Bool) -> Result[Int, String] = {
   load_env(root)!
-  let creds = llm.credentials_from_env()! |> option.to_result("no model credentials: put CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in .env or the environment")!
+  // Cloudflare's credentials only matter for a cf: model. Both models are looked up
+  // before anything runs, so a missing key is one line and not a failed attempt.
+  let creds = llm.credentials_from_env()! ?? llm.NO_CREDENTIALS
+  let _ = llm.endpoint_of(creds, map.get(a.flags, "model") ?? ask.MODEL_WORK)!
+  let _ = llm.endpoint_of(creds, map.get(a.flags, "strong-model") ?? ask.MODEL_STRONG)!
   let (rm, rmw) = repo_map(root, task)!
   let verify_timeout_ms = (int.parse(map.get(a.flags, "timeout") ?? "120") ?? 120) * 1000
   let obs = observe.observe(root, map.get(a.flags, "verify") ?? "", int.parse(map.get(a.flags, "files-seen") ?? "400") ?? 400,
