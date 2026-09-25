@@ -50,6 +50,7 @@ failures. `--model` and `--strong-model` choose others, as `PROVIDER:MODEL`:
 |---|---|---|
 | `cf:glm-5.3-flash` (default), `cf:glm-5.3`, … | Cloudflare Workers AI | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` |
 | `openai:…`, `openrouter:…`, `deepseek:…`, `zai:…`, `groq:…` | that OpenAI-compatible service | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, … |
+| `anthropic:…`, `gemini:…` | Anthropic's Messages API, Gemini | `ANTHROPIC_API_KEY`; `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
 | `ollama:…`, `lmstudio:…` | a local server | nothing |
 | `NAME:MODEL` | any other OpenAI-compatible service | `NAME_BASE_URL`, `NAME_API_KEY` |
 | `claude`, `claude:sonnet`, … | Claude Code's `claude -p`, on your Claude login | `claude` on `PATH` |

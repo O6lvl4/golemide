@@ -49,6 +49,7 @@ golemide は `cf:glm-5.3-flash` で動き、失敗が続くと `cf:glm-5.3` に�
 |---|---|---|
 | `cf:glm-5.3-flash`（既定）、`cf:glm-5.3`、… | Cloudflare Workers AI | `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN` |
 | `openai:…`、`openrouter:…`、`deepseek:…`、`zai:…`、`groq:…` | その OpenAI 互換サービス | `OPENAI_API_KEY`、`OPENROUTER_API_KEY` など |
+| `anthropic:…`、`gemini:…` | Anthropic の Messages API、Gemini | `ANTHROPIC_API_KEY`、`GEMINI_API_KEY` または `GOOGLE_API_KEY` |
 | `ollama:…`、`lmstudio:…` | 手元のサーバー | なし |
 | `NAME:MODEL` | それ以外の OpenAI 互換サービス | `NAME_BASE_URL`、`NAME_API_KEY` |
 | `claude`、`claude:sonnet`、… | Claude Code の `claude -p`（Claude のログインで動く） | `PATH` 上の `claude` |
