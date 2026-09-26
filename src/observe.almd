@@ -6,86 +6,7 @@ import env
 import process
 import regex
 import json
-
-type Marker = { file: String, language: String, test_command: String, note: String }
-
-// Marker file → ecosystem, most specific first; the first match wins.
-let MARKERS = [
-  Marker { file: "almide.toml", language: "almide", test_command: "almide test", note: "sources under src/, tests under tests/; run one file with `almide run <file>`" },
-  Marker { file: "Cargo.toml", language: "rust", test_command: "cargo test", note: "sources under src/" },
-  Marker { file: "go.mod", language: "go", test_command: "go test ./...", note: "tests are *_test.go beside the source" },
-  Marker { file: "pyproject.toml", language: "python", test_command: "pytest -q", note: "" },
-  Marker { file: "setup.py", language: "python", test_command: "pytest -q", note: "" },
-  Marker { file: "setup.cfg", language: "python", test_command: "pytest -q", note: "" },
-  Marker { file: "Gemfile", language: "ruby", test_command: "bundle exec rspec", note: "" },
-  Marker { file: "pom.xml", language: "java", test_command: "mvn -q test", note: "" },
-  Marker { file: "build.gradle", language: "java", test_command: "gradle test", note: "" },
-  Marker { file: "build.gradle.kts", language: "kotlin", test_command: "gradle test", note: "" },
-  Marker { file: "composer.json", language: "php", test_command: "vendor/bin/phpunit", note: "" },
-  Marker { file: "mix.exs", language: "elixir", test_command: "mix test", note: "" },
-  Marker { file: "Package.swift", language: "swift", test_command: "swift test", note: "" },
-  Marker { file: "pubspec.yaml", language: "dart", test_command: "dart test", note: "" },
-  Marker { file: "deno.json", language: "typescript", test_command: "deno test", note: "" },
-  Marker { file: "package.json", language: "javascript", test_command: "", note: "read package.json scripts.test — do not assume npm test exists" },
-  Marker { file: "CMakeLists.txt", language: "c++", test_command: "ctest", note: "" },
-  Marker { file: "Makefile", language: "unknown", test_command: "", note: "check the Makefile for a test target" },
-]
-
-type Fingerprint = { marker: String, language: String, test_command: String, note: String }
-
-// package.json is the one marker whose test command is written inside it.
-effect fn package_json_test(path: String) -> String = match fs.read_text(path) {
-  err(_) => "",
-  ok(text) => match json.parse(text) {
-    err(_) => "",
-    ok(pkg) => {
-      let script = match value.field(pkg, "scripts") { ok(s) => json.get_string(s, "test") ?? "", err(_) => "" }
-      if script == "" or string.contains(string.to_lower(script), "no test specified") then ""
-      else {
-        let pm = list.first(string.split(json.get_string(pkg, "packageManager") ?? "", "@")) ?? ""
-        (if pm == "pnpm" or pm == "yarn" or pm == "bun" then pm else "npm") + " test"
-      }
-    },
-  },
-}
-
-effect fn fingerprint(root: String) -> Fingerprint? = {
-  var found: Fingerprint? = none
-  for m in MARKERS {
-    if option.is_none(found) and fs.exists(root + "/" + m.file) then {
-      let cmd = if m.file == "package.json" then package_json_test(root + "/" + m.file)! else m.test_command
-      found = some(Fingerprint { marker: m.file, language: m.language, test_command: cmd, note: m.note })
-    } else ()
-  }
-  found
-}
-
-// Source extension → language, used only when no marker file matched.
-let EXTENSION_LANGUAGE = [("almd", "almide"), ("rs", "rust"), ("go", "go"), ("py", "python"), ("rb", "ruby"), ("ts", "typescript"),
-  ("tsx", "typescript"), ("js", "javascript"), ("mjs", "javascript"), ("java", "java"), ("kt", "kotlin"), ("swift", "swift"),
-  ("cpp", "c++"), ("cc", "c++"), ("ex", "elixir"), ("exs", "elixir"), ("php", "php")]
-
-fn extension_of(path: String) -> String = {
-  let name = list.last(string.split(path, "/")) ?? path
-  match string.last_index_of(name, ".") {
-    some(i) => if i > 0 then string.to_lower(string.drop(name, i + 1)) else "",
-    none => "",
-  }
-}
-
-fn language_of_ext(ext: String) -> String? = option.map(list.find(EXTENSION_LANGUAGE, (p) => p.0 == ext), (p) => p.1)
-
-// The language most of these files are written in, if one dominates.
-fn language_from_files(files: List[String]) -> String? = {
-  var counts: Map[String, Int] = [:]
-  for f in files {
-    match language_of_ext(extension_of(f)) { some(l) => map.insert(counts, l, (map.get(counts, l) ?? 0) + 1), none => () }
-  }
-  var best: String? = none
-  var best_n = 0
-  for (l, n) in map.entries(counts) { if n > best_n then { best = some(l); best_n = n } else () }
-  best
-}
+import self.ecosystem
 
 type CommandResult = { command: String, code: Int, stdout: String, stderr: String, timed_out: Bool, duration_ms: Int, spawn_error: String }
 
@@ -110,10 +31,8 @@ effect fn run(command: String, cwd: String, timeout_ms: Int) -> CommandResult = 
   let script = "cd " + shell_quote(cwd) + " && ( " + command + " )" + redirect
   let status = process.exec_status_timeout("bash", ["-c", script], timeout_ms)
   // whatever was written before the deadline is still what the model needs
-  let captured_out = if out_path == "" then "" else (fs.read_text(out_path) ?? "")
-  let captured_err = if err_path == "" then "" else (fs.read_text(err_path) ?? "")
-  if out_path != "" then { let _ = fs.remove(out_path); () } else ()
-  if err_path != "" then { let _ = fs.remove(err_path); () } else ()
+  let captured_out = captured(out_path)!
+  let captured_err = captured(err_path)!
   match status {
     ok(st) => CommandResult { command: command, code: st.code,
       stdout: if redirect == "" then st.stdout else captured_out,
@@ -127,6 +46,15 @@ effect fn run(command: String, cwd: String, timeout_ms: Int) -> CommandResult = 
     },
   }
 }
+
+// What a stream's file holds, with the file removed; "" when there was none.
+effect fn captured(path: String) -> String =
+  if path == "" then ""
+  else {
+    let text = fs.read_text(path) ?? ""
+    let _ = fs.remove(path)
+    text
+  }
 
 fn shell_quote(s: String) -> String = "'" + string.replace(s, "'", "'\\''") + "'"
 
@@ -162,11 +90,8 @@ fn harness_failure(r: CommandResult) -> String =
   else {
     let lines = string.split(r.stdout + "\n" + r.stderr, "\n")
     let head = string.to_lower(string.join(list.take(lines, 12), "\n"))
-    var why = ""
-    for (re, w) in HARNESS_BROKEN {
-      if why == "" then match regex.find(re, head) { some(m) => { why = w + " (" + string.trim(m) + ")" }, none => () } else ()
-    }
-    if why == "" then shell_not_found(r.code, lines) else why
+    let signs = list.filter_map(HARNESS_BROKEN, (p) => option.map(regex.find(p.0, head), (m) => p.1 + " (" + string.trim(m) + ")"))
+    list.first(signs) ?? shell_not_found(r.code, lines)
   }
 
 // 126 and 127 are the shell's own statuses: a command it could not run, or could not
@@ -195,7 +120,7 @@ effect fn list_files(root: String, limit: Int) -> List[String] = {
   if list.is_empty(files) then {
     let f = run("find . -type d \\( -name node_modules -o -name .git -o -name target -o -name dist -o -name build -o -name vendor -o -name __pycache__ -o -name .venv -o -name venv \\) -prune -o -type f -print", root, 15000)!
     files = list.filter(list.map(string.split(f.stdout, "\n"), (s) => string.trim(string.strip_prefix(s, "./") ?? s)), (s) => s != "")
-  } else ()
+  }
   list.take(list.filter(files, (f) => not is_noise(f)), limit)
 }
 
@@ -203,24 +128,25 @@ effect fn list_files(root: String, limit: Int) -> List[String] = {
 fn omitted_by_directory(all: List[String], shown: List[String]) -> String = {
   var counts: Map[String, Int] = [:]
   var order: List[String] = []
-  for f in all {
-    if not list.contains(shown, f) then {
-      let dir = match string.index_of(f, "/") { some(i) => if i > 0 then string.take(f, i) + "/" else "(root)", none => "(root)" }
-      if not map.contains(counts, dir) then list.push(order, dir) else ()
-      map.insert(counts, dir, (map.get(counts, dir) ?? 0) + 1)
-    } else ()
+  for f in list.filter(all, (f) => not list.contains(shown, f)) {
+    let dir = top_dir(f)
+    if not map.contains(counts, dir) then list.push(order, dir)
+    map.insert(counts, dir, (map.get(counts, dir) ?? 0) + 1)
   }
-  if list.is_empty(order) then ""
-  else {
-    let ranked = list.sort_by(order, (d) => 0 - (map.get(counts, d) ?? 0))
-    let total = list.sum(list.map(ranked, (d) => map.get(counts, d) ?? 0))
-    let head = string.join(list.map(list.take(ranked, 12), (d) => d + " (" + int.to_string(map.get(counts, d) ?? 0) + ")"), ", ")
-    let rest = if list.len(ranked) > 12 then ", and " + int.to_string(list.len(ranked) - 12) + " more" else ""
-    "… " + int.to_string(total) + " further file(s) not listed, under: " + head + rest
-  }
+  if list.is_empty(order) then "" else omitted_summary(order, counts)
 }
 
-type Observation = { root: String, fingerprint: Fingerprint?, verify_command: String, verify_source: String,
+fn top_dir(f: String) -> String = match string.index_of(f, "/") { some(i) => if i > 0 then string.take(f, i) + "/" else "(root)", none => "(root)" }
+
+fn omitted_summary(order: List[String], counts: Map[String, Int]) -> String = {
+  let ranked = list.sort_by(order, (d) => 0 - (map.get(counts, d) ?? 0))
+  let total = list.sum(list.map(ranked, (d) => map.get(counts, d) ?? 0))
+  let head = string.join(list.map(list.take(ranked, 12), (d) => d + " (" + int.to_string(map.get(counts, d) ?? 0) + ")"), ", ")
+  let rest = if list.len(ranked) > 12 then ", and " + int.to_string(list.len(ranked) - 12) + " more" else ""
+  "… " + int.to_string(total) + " further file(s) not listed, under: " + head + rest
+}
+
+type Observation = { root: String, fingerprint: ecosystem.Fingerprint?, verify_command: String, verify_source: String,
   files: List[String], files_omitted: String, repo_map: String, repo_map_warnings: List[String],
   baseline: CommandResult?, harness_broken: String }
 
@@ -233,7 +159,7 @@ effect fn observe(root: String, verify_given: String, file_limit: Int, verify_ti
 }
 
 effect fn observe_dir(root: String, verify_given: String, file_limit: Int, verify_timeout_ms: Int, repo_map: String, repo_map_warnings: List[String]) -> Result[Observation, String] = {
-  let fp = fingerprint(root)!
+  let fp = ecosystem.fingerprint(root)!
   let (verify_command, verify_source) =
     if verify_given != "" then (verify_given, "user")
     else match fp { some(f) => if f.test_command != "" then (f.test_command, "marker") else ("", "none"), none => ("", "none") }
@@ -241,7 +167,7 @@ effect fn observe_dir(root: String, verify_given: String, file_limit: Int, verif
   let files = list.take(all_files, file_limit)
   let fingerprint_out = match fp {
     some(f) => some(f),
-    none => option.map(language_from_files(files), (l) => Fingerprint { marker: "(no marker file)", language: l, test_command: "", note: "language inferred from the source files, not from a manifest" }),
+    none => option.map(ecosystem.language_from_files(files), (l) => ecosystem.Fingerprint { marker: "(no marker file)", language: l, test_command: "", note: "language inferred from the source files, not from a manifest" }),
   }
   let baseline = if verify_command != "" then some(run(verify_command, root, verify_timeout_ms)!) else none
   ok(Observation { root: root, fingerprint: fingerprint_out, verify_command: verify_command, verify_source: verify_source,

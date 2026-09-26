@@ -1,0 +1,28 @@
+// Progress, said on stderr unless --quiet: a note, the start of a phase, and what hedged
+// and throttled requests cost in time.
+
+
+
+effect fn note(quiet: Bool, text: String) -> Unit = if quiet then () else eprintln("  note: " + text)
+
+// A hedge that never wins is a second request paid for and thrown away; one
+// that usually wins says the first request was not going to finish in time.
+// Neither can be told from the outside, so both are said out loud.
+// ", 40s of it waiting on 2 rate limits", or "" when this attempt was never throttled.
+fn throttle_note(now: (Int, Int), count_before: Int, ms_before: Int) -> String = {
+  let (count, ms) = now
+  if count == count_before then ""
+  else ", " + int.to_string((ms - ms_before) / 1000) + "s of it waiting on " + int.to_string(count - count_before) + " rate limit(s)"
+}
+
+effect fn note_hedges(quiet: Bool, hedged: Int, wins: Int) -> Unit =
+  if hedged > 0 then note(quiet, "hedged " + int.to_string(hedged) + " slow request(s), "
+    + (if wins == 0 then "and the first answer still won every time — the second was paid for and discarded"
+       else "the hedge answered first " + int.to_string(wins) + " of them"))!
+
+effect fn phase(quiet: Bool, name: String, detail: String) -> Unit = if quiet then () else eprintln("\n[" + name + "]" + (if detail == "" then "" else " " + detail))
+
+test "an attempt says how much of it went to rate limits, and nothing when there were none" {
+  assert_eq(throttle_note((3, 45000), 1, 5000), ", 40s of it waiting on 2 rate limit(s)")
+  assert_eq(throttle_note((1, 5000), 1, 5000), "")
+}

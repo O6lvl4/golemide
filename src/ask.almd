@@ -100,7 +100,7 @@ fn parse_json(raw: String) -> Result[Value, String] = {
           err(_) => { last = e },
         },
       }
-    } else ()
+    }
   }
   match found {
     some(v) => ok(v),
@@ -110,13 +110,13 @@ fn parse_json(raw: String) -> Result[Value, String] = {
 
 // Raw model traffic, on CAIRN_DEBUG (MENDIDE_DEBUG still works).
 effect fn debug(label: String, body: String) -> Unit =
-  if (env.get("GOLEMIDE_DEBUG") ?? env.get("CAIRN_DEBUG") ?? env.get("MENDIDE_DEBUG") ?? "") != "" then eprintln("\n--- " + label + " (" + int.to_string(string.len(body)) + " chars) ---\n" + body + "\n---") else ()
+  if (env.get("GOLEMIDE_DEBUG") ?? env.get("CAIRN_DEBUG") ?? env.get("MENDIDE_DEBUG") ?? "") != "" then eprintln("\n--- " + label + " (" + int.to_string(string.len(body)) + " chars) ---\n" + body + "\n---")
 
 // `hedged`/`hedge_wins` count transport hedges across every retry this ask
 // made, so the caller can say what the second requests actually bought.
 type Asked = { value: Value, cost_usd: Float, hedged: Int, hedge_wins: Int }
 
-// what one call produced: an answer, a reason to retry, or a reason to stop
+// what one call produced: an answer, or a reason to retry or stop
 type Step = | Got(String) | Retry(String)
 
 // 5s, 10s, 20s, 40s, 60s, 60s — enough to outlast a per-minute window
@@ -142,102 +142,90 @@ effect fn count_throttle(ms: Int) -> Unit = {
   throttled_ms = throttled_ms + ms
 }
 
+// What an ask is for, and where it stands between calls: the budget and effort the next
+// call goes out at, the retries each kind of failure has had, and what was spent.
+type Asking = { creds: llm.Credentials, prompt: String, schema: Value, o: Options }
+type Tally = { budget: Int, effort: String, timed_out: Int, attempt: Int, rate_limited: Int, cost: Float, hedged: Int, hedge_wins: Int }
+
 // Ask for a value matching `schema`, and parse it. Constrained decoding on
 // Workers AI enforces shape, not size; callers check arity themselves.
 effect fn ask_json(creds: llm.Credentials, prompt: String, schema: Value, o: Options) -> Result[Asked, String] = {
   debug("prompt", prompt)!
-  var budget = o.max_output_tokens
-  var effort = o.reasoning_effort
-  var timed_out = 0
-  var attempt = 0
-  var rate_limited = 0
-  var cost = 0.0
-  var hedged = 0
-  var hedge_wins = 0
-  // (an Option holding a Result trips the native auto-propagation; the
-  // outcome is kept as two plain vars instead)
-  var finished = false
-  var answer: Value? = none
-  var failure = ""
-  while not finished {
-    // every state change below is a statement: an assignment inside a
-    // match arm whose value is bound by `let` is lost on the native backend
-    let req = llm.Request { prompt: prompt, system: o.system, model: o.model, max_output_tokens: budget, reasoning_effort: effort, schema: some(schema) }
-    let res = llm.invoke(creds, req)
-    var outcome: Step = Retry("")
-    match res {
-      ok(r) => {
-        cost = cost + r.cost_usd
-        if r.hedged then hedged = hedged + 1 else ()
-        if r.won_by_hedge then hedge_wins = hedge_wins + 1 else ()
-        if looks_truncated(r.text) and budget < 65536 then {
-          budget = int.min(65536, budget * 3)
-          outcome = Retry("response truncated before any content could be parsed (" + int.to_string(string.len(r.text)) + " chars) [retrying at " + int.to_string(budget) + " output tokens; raise max_completion_tokens]")
-        } else outcome = Got(r.text)
-      },
-      err(m) => {
-        if is_budget_truncation(m) and (budget < 65536 or (is_reasoning_truncation(m) and effort != "low")) then {
-          // Both levers point the same way here, and only one of them was being
-          // pulled: more room for the answer AND less spent before it starts. Without
-          // the effort step, a reasoning truncation at `high` retries three times
-          // larger and the reasoning simply takes the extra room too -- which is how a
-          // call that began at 2048 tokens reached 55296 and still returned nothing.
-          let before = effort + "/" + int.to_string(budget)
-          budget = int.min(65536, budget * 3)
-          if is_reasoning_truncation(m) then { effort = lower_effort(effort) }
-          outcome = Retry(m + " [retrying at " + effort + "/" + int.to_string(budget) + ", was " + before + "]")
-        } else if is_server_timeout(m) then {
-          // less thinking and a smaller budget both shorten the generation;
-          // after two such shrinks a third timeout is the provider's answer
-          timed_out = timed_out + 1
-          if timed_out > 2 then outcome = Retry(m + " [gave up after 2 smaller retries]")
-          else {
-            let before = effort + "/" + int.to_string(budget)
-            effort = lower_effort(effort)
-            budget = int.max(4096, budget / 2)
-            outcome = Retry(m + " [retrying smaller: " + before + " -> " + effort + "/" + int.to_string(budget) + "]")
-          }
-        } else outcome = Retry(m)
-      },
-    }
-    match outcome {
-      Got(text) => {
-        debug("response", text)!
-        match parse_json(text) { ok(v) => { answer = some(v) }, err(e) => { failure = e } }
-        finished = true
-      },
-      Retry(m) => {
-        let gave_up = string.contains(m, "[gave up")
-        if gave_up or not (is_transient(m) or is_budget_truncation(m)) then { failure = m; finished = true }
-        else {
-          var wait_ms = 0
-          var stop = false
-          if is_rate_limit(m) then {
-            rate_limited = rate_limited + 1
-            if rate_limited > 6 then stop = true
-            else wait_ms = backoff(rate_limited) + (env.millis() % 1000)
-            if not stop then { count_throttle(wait_ms)! } else ()
-          } else if is_budget_truncation(m) or is_server_timeout(m) then {
-            attempt = attempt + 1
-            if attempt >= 5 then stop = true else wait_ms = 0
-          } else {
-            attempt = attempt + 1
-            if attempt >= 3 then stop = true else wait_ms = 2000 * attempt
-          }
-          if stop then { failure = m; finished = true }
-          else {
-            debug("retry", m + "\nretrying in " + int.to_string(wait_ms) + "ms")!
-            env.sleep_ms(wait_ms)
-          }
-        }
-      },
-    }
-  }
-  match answer {
-    some(v) => ok(Asked { value: v, cost_usd: cost, hedged: hedged, hedge_wins: hedge_wins }),
-    none => err(if failure == "" then "no answer" else failure),
+  ask_from(Asking { creds: creds, prompt: prompt, schema: schema, o: o },
+    Tally { budget: o.max_output_tokens, effort: o.reasoning_effort, timed_out: 0, attempt: 0, rate_limited: 0, cost: 0.0, hedged: 0, hedge_wins: 0 })
+}
+
+effect fn ask_from(a: Asking, t: Tally) -> Result[Asked, String] = {
+  let req = llm.Request { prompt: a.prompt, system: a.o.system, model: a.o.model, max_output_tokens: t.budget, reasoning_effort: t.effort, schema: some(a.schema) }
+  let (next, step) = match llm.invoke(a.creds, req) { ok(r) => after_reply(t, r), err(m) => after_error(t, m) }
+  match step {
+    Got(text) => {
+      debug("response", text)!
+      match parse_json(text) {
+        ok(v) => ok(Asked { value: v, cost_usd: next.cost, hedged: next.hedged, hedge_wins: next.hedge_wins }),
+        err(e) => err(e),
+      }
+    },
+    Retry(m) => retried(a, next, m),
   }
 }
+
+// A failed call: waited out and sent again, or the end of the ask.
+effect fn retried(a: Asking, t: Tally, m: String) -> Result[Asked, String] = {
+  let (next, wait) = paced(t, m)
+  if wait < 0 then err(if m == "" then "no answer" else m)
+  else {
+    let ms = if is_rate_limit(m) then wait + env.millis() % 1000 else wait
+    if is_rate_limit(m) then count_throttle(ms)!
+    debug("retry", m + "\nretrying in " + int.to_string(ms) + "ms")!
+    env.sleep_ms(ms)
+    ask_from(a, next)
+  }
+}
+
+fn at(t: Tally) -> String = t.effort + "/" + int.to_string(t.budget)
+
+fn after_reply(t: Tally, r: llm.Response) -> (Tally, Step) = {
+  let spent = { ...t, cost: t.cost + r.cost_usd, hedged: t.hedged + (if r.hedged then 1 else 0), hedge_wins: t.hedge_wins + (if r.won_by_hedge then 1 else 0) }
+  if looks_truncated(r.text) and t.budget < 65536 then {
+    let bigger = { ...spent, budget: int.min(65536, t.budget * 3) }
+    (bigger, Retry("response truncated before any content could be parsed (" + int.to_string(string.len(r.text)) + " chars) [retrying at " + int.to_string(bigger.budget) + " output tokens; raise max_completion_tokens]"))
+  } else (spent, Got(r.text))
+}
+
+fn after_error(t: Tally, m: String) -> (Tally, Step) =
+  if is_budget_truncation(m) and (t.budget < 65536 or (is_reasoning_truncation(m) and t.effort != "low")) then {
+    // Both levers point the same way here, and only one of them was being
+    // pulled: more room for the answer AND less spent before it starts. Without
+    // the effort step, a reasoning truncation at `high` retries three times
+    // larger and the reasoning simply takes the extra room too -- which is how a
+    // call that began at 2048 tokens reached 55296 and still returned nothing.
+    let roomier = { ...t, budget: int.min(65536, t.budget * 3), effort: if is_reasoning_truncation(m) then lower_effort(t.effort) else t.effort }
+    (roomier, Retry(m + " [retrying at " + at(roomier) + ", was " + at(t) + "]"))
+  } else if is_server_timeout(m) then shrunk({ ...t, timed_out: t.timed_out + 1 }, m)
+  else (t, Retry(m))
+
+// less thinking and a smaller budget both shorten the generation;
+// after two such shrinks a third timeout is the provider's answer
+fn shrunk(t: Tally, m: String) -> (Tally, Step) =
+  if t.timed_out > 2 then (t, Retry(m + " [gave up after 2 smaller retries]"))
+  else {
+    let smaller = { ...t, effort: lower_effort(t.effort), budget: int.max(4096, t.budget / 2) }
+    (smaller, Retry(m + " [retrying smaller: " + at(t) + " -> " + at(smaller) + "]"))
+  }
+
+// How long to wait before the next call (before a rate limit's jitter), or -1 to stop.
+fn paced(t: Tally, m: String) -> (Tally, Int) =
+  if string.contains(m, "[gave up") or not (is_transient(m) or is_budget_truncation(m)) then (t, -1)
+  else if is_rate_limit(m) then {
+    let n = t.rate_limited + 1
+    ({ ...t, rate_limited: n }, if n > 6 then -1 else backoff(n))
+  } else {
+    let n = t.attempt + 1
+    let wait = if is_budget_truncation(m) or is_server_timeout(m) then (if n >= 5 then -1 else 0)
+      else if n >= 3 then -1 else 2000 * n
+    ({ ...t, attempt: n }, wait)
+  }
 
 test "json parsing tolerates fences, prose and trailing commas" {
   assert(result.is_ok(parse_json("{\"a\": 1}")))

@@ -1,0 +1,247 @@
+// The model's answer turned into files on disk: edits read and checked (a path it was
+// shown, a whole file rather than a fragment, replacements applied), then written one
+// file at a time through the syntax gate, with what was there kept to undo or to diff.
+
+import fs
+import json
+import regex
+import base64
+import bytes
+import self.observe
+import self.gate
+import self.replace
+import self.notes
+import self.diffing
+import self.paths
+import self.saving
+
+type Edit = { path: String, source: String }
+
+type Rejected = { path: String, why: String }
+
+type Batch = { edits: List[Edit], rejected: List[Rejected] }
+
+type Applied = { applied: List[Edit], rejected: List[Rejected], diffs: List[String] }
+
+// The model's answer, turned into edits that may be written and reasons the
+// rest may not. Nothing here touches the disk: a path outside the root, a file
+// that was never shown, a creation that was not allowed and a degenerate write
+// are all refused before the gate ever sees them.
+fn replacements_of(v: Value) -> List[replace.Replacement] =
+  list.filter_map(json.get_array(v, "replacements") ?? [], (r) =>
+    match (json.get_string(r, "old"), json.get_string(r, "new")) {
+      (some(o), some(n)) => some(replace.Replacement { old: o, new: n }),
+      _ => none,
+    })
+
+// Replacements are applied by `replace.apply`, which finds the text the model named
+// even when it was not copied exactly. What follows is why the replacement form exists.
+//
+// Why this exists, stated at the size it actually measures. `bench/failures.py` over 280
+// exercise-runs: 13% of failures are the harness discarding the answer as a FRAGMENT --
+// the model changed three lines and sent three lines, where the protocol demands the whole
+// file. It rises with the size of the file: 2% under 2 KB, 14% at 2-6 KB, 18% above.
+//
+// A first pass at that census said 55% and named this the harness's main gap. That was a
+// bug in the census, not a finding: its signature matched a summary line golemide prints
+// when every edit was refused for ANY reason, which swept in syntax-gate refusals -- the
+// model writing invalid code. Corrected, the protocol is 13% and the syntax gate is 41%.
+// This change is worth making at 13%; it is not the lever the overstated number implied.
+//
+// Measured on the case it exists for: a 10,003-byte file with one wrong line, the same
+// size class as `grade-report`. Both builds solved it; what differs is what the harness
+// made the model do.
+//
+//   whole-file only  attempt 1 refused -- "is a 45-byte fragment of a 10003-byte file"
+//                    -- then re-asked and restated all 10,003    $0.003517   49s
+//   replacements     "applied 1 replacement(s)"                  $0.001450    4s
+//
+// -59% cost and -92% wall clock, and the old build reproduced the census signature
+// verbatim: the model wanted to send 45 bytes, was refused, and paid for the whole file.
+// The refusal costs a ROUND, which is what turns into a failure once attempts are scarce
+// -- so the value here is not the tokens, it is the round that is no longer spent being
+// told to say the same thing at 200x the length.
+//
+// The model picks correctly without being told which case it is in: it used replacements
+// here, and whole-file `source` on a stripped benchmark exercise, where filling in every
+// function body genuinely is a rewrite.
+//
+// The safety property is UNIQUENESS, not cleverness. `old` must occur exactly once in the
+// file: found twice, the model has not said which it meant, and guessing would silently
+// edit the wrong line. Not found at all is usually the model quoting from memory instead
+// of from the text it was shown. Both are refused by name, and the reason travels into
+// the retry history, so the next attempt is told what was wrong rather than just "failed".
+
+// What an edit is checked against: the project, the files the model was shown
+// completely, and whether it may create one.
+type Collecting = { root: String, read: List[String], allow_create: Bool, quiet: Bool }
+
+effect fn collect_edits(obs: observe.Observation, answer: Value, read: List[String], allow_create: Bool, quiet: Bool, into: List[Edit]) -> Result[Batch, String] = {
+  let c = Collecting { root: obs.root, read: read, allow_create: allow_create, quiet: quiet }
+  var b = Batch { edits: into, rejected: [] }
+  for v in json.get_array(answer, "edits") ?? [] { b = collected(c, b, v)! }
+  ok(b)
+}
+
+effect fn collected(c: Collecting, b: Batch, v: Value) -> Batch = match edit_of(v) {
+  none => refused(b, json.get_string(v, "path") ?? "?", "malformed edit"),
+  some(e0) => {
+    let p = paths.resolve_edit_path(e0.path, c.root, c.read)
+    if p != paths.normalize_path(e0.path) then notes.note(c.quiet, "resolved " + e0.path + " -> " + p)!
+    match source_of(c, p, e0, v) {
+      err(why) => rejected(c, b, p, why)!,
+      ok(source) => {
+        let why = path_refusal(c, p)!
+        if why != "" then rejected(c, b, p, why)! else written(c, b, p, source)!
+      },
+    }
+  },
+}
+
+fn refused(b: Batch, p: String, why: String) -> Batch = { ...b, rejected: b.rejected + [Rejected { path: p, why: why }] }
+
+effect fn rejected(c: Collecting, b: Batch, p: String, why: String) -> Batch = {
+  notes.note(c.quiet, "rejected " + p + ": " + why)!
+  refused(b, p, why)
+}
+
+// A replacement batch becomes a complete source here, against the file as it is
+// now. Everything downstream -- the fragment guard, the syntax gate, the write,
+// the diff in the history -- then sees exactly what it saw before, which is the
+// point: the second edit format adds a way to SAY the change, not a second path
+// through the checks that decide whether it is allowed.
+effect fn source_of(c: Collecting, p: String, e0: Edit, v: Value) -> Result[String, String] = {
+  let reps = replacements_of(v)
+  if list.is_empty(reps) then ok(unwrap_source(e0.source))
+  else match replace.apply(fs.read_text(c.root + "/" + p) ?? "", reps) {
+    err(e) => err(e),
+    ok(a) => {
+      notes.note(c.quiet, "applied " + int.to_string(list.len(reps)) + " replacement(s) to " + p + (if list.is_empty(a.1) then "" else " (" + string.join(a.1, "; ") + ")"))!
+      ok(a.0)
+    },
+  }
+}
+
+// Why the file `p` may not be written at all, or "".
+effect fn path_refusal(c: Collecting, p: String) -> String = {
+  let on_disk = fs.exists(c.root + "/" + p)
+  if not list.contains(c.read, p) and on_disk then "not among the files it was shown completely" + paths.did_you_mean(p, c.read)
+  else if not on_disk and not c.allow_create then "does not exist (creation not enabled)" + paths.did_you_mean(p, c.read)
+  else if string.starts_with(p, "/") or string.contains(p, "..") then "outside the project root"
+  else ""
+}
+
+// The edit, unless what it writes is degenerate; a second edit to the same file in one
+// batch replaces the first, and says so.
+effect fn written(c: Collecting, b: Batch, p: String, source: String) -> Batch = {
+  let degenerate = degenerate_write(c.root, p, source)!
+  if degenerate != "" then {
+    if string.len(source) < 200 then notes.note(c.quiet, "  " + p + " was: " + string.take(source, 120))!
+    rejected(c, b, p, degenerate)!
+  } else {
+    let twice = list.any(b.edits, (x) => x.path == p)
+    let kept = if twice then refused({ ...b, edits: list.filter(b.edits, (x) => x.path != p) }, p, "named twice in one batch") else b
+    { ...kept, edits: kept.edits + [Edit { path: p, source: source }] }
+  }
+}
+
+// One file, one write: the good write lands and the bad one is reported, so a
+// batch is never all-or-nothing on a single bad file.
+effect fn apply_edits(root: String, edits: List[Edit], quiet: Bool) -> Result[Applied, String] = {
+  var applied: List[Edit] = []
+  var rejected: List[Rejected] = []
+  var diffs: List[String] = []
+  var stamps: List[(String, Int)] = []
+  for e in edits {
+    let full = root + "/" + e.path
+    let before = fs.read_text(full) ?? ""
+    let was = saving.mtime_of(full)!
+    match gate.write_checked(full, e.source, true) {
+      ok(_) => { list.push(applied, e); list.push(stamps, (e.path, was)); list.push(diffs, "--- " + e.path + " ---\n" + diffing.unified_diff(before, e.source)) },
+      err(why) => {
+        list.push(rejected, Rejected { path: e.path, why: "refused by the syntax gate: " + why + "; the file begins \"" + first_line(e.source) + "\"" })
+        notes.note(quiet, "apply rejected " + e.path + ": " + why)!
+      },
+    }
+  }
+  if not list.is_empty(applied) then {
+    saving.bump_mtimes(root, stamps)!
+    if not quiet then { for e in applied { eprintln("  wrote " + e.path + " (" + int.to_string(string.len(e.source)) + " bytes)") } }
+  }
+  ok(Applied { applied: applied, rejected: rejected, diffs: diffs })
+}
+
+// The file without the markdown fence a model wraps it in, then decoded.
+fn unwrap_source(source: String) -> String = {
+  let t = string.trim(source)
+  let lines = string.split(t, "\n")
+  let first = list.first(lines) ?? ""
+  let last = list.last(lines) ?? ""
+  let fenced = list.len(lines) >= 2 and regex.is_match("^```[A-Za-z0-9+.-]*[ \\t]*$", first) and regex.is_match("^```\\s*$", last)
+  let s = if fenced then string.join(list.take(list.drop(lines, 1), list.len(lines) - 2), "\n") + "\n" else source
+  decode_source(s)
+}
+
+// Two more encodings seen on the polyglot run: the whole file as base64,
+// and every newline spelled as the two characters `\` `n`.
+fn decode_source(source: String) -> String = {
+  let t = string.trim(source)
+  let b64 = string.len(t) >= 40 and regex.is_match("^[A-Za-z0-9+/]+=*$", t) and string.len(t) % 4 == 0
+  let decoded = if b64 then (match base64.decode(t) { ok(bs) => bytes.to_string(bs) ?? "", err(_) => "" }) else ""
+  if decoded != "" and string.contains(decoded, "\n") and not string.contains(decoded, "\u{FFFD}") then (if string.ends_with(decoded, "\n") then decoded else decoded + "\n")
+  else if not string.contains(source, "\n") and string.count(source, "\\n") >= 2 then string.replace(string.replace(string.replace(string.replace(source, "\\r\\n", "\n"), "\\n", "\n"), "\\t", "\t"), "\\\"", "\"")
+  else source
+}
+
+// Why this edit must not be written, or "": a blank, a file name where the
+// file goes, a fragment, or a byte-identical echo. A parser cannot see size.
+effect fn degenerate_write(root: String, path: String, source: String) -> String = {
+  let full = root + "/" + path
+  match fs.stat(full) {
+    err(_) => "",
+    ok(st) =>
+      if st.size == 0 then ""
+      else if string.trim(source) == "" then "would blank the file: emit its full contents, with the fix applied"
+      else if not string.contains(source, "\n") and regex.is_match("^[A-Za-z0-9_./-]+\\.[A-Za-z0-9]{1,8}$", string.trim(source)) and string.len(source) < 200 then "looks like a file name (" + string.trim(source) + "), not file contents: source must be the whole file"
+      else if st.size > 200 and string.len(source) * 5 < st.size then "is a " + int.to_string(string.len(source)) + "-byte fragment of a " + int.to_string(st.size) + "-byte file: emit every line of the file, not just the part you changed"
+      else if (fs.read_text(full) ?? "") == source then "is identical to the current file: nothing was changed"
+      else "",
+  }
+}
+
+// An edit names a path and then says the change in ONE of two ways: the complete new
+// source, or a list of replacements. A path with neither is malformed.
+fn edit_of(v: Value) -> Edit? = match json.get_string(v, "path") {
+  none => none,
+  some(p) => match json.get_string(v, "source") {
+    some(s) => some(Edit { path: p, source: s }),
+    // `source` is absent: the replacements are read from the same value in
+    // `collect_edits`, which has the file on disk to apply them against.
+    none => if list.is_empty(replacements_of(v)) then none else some(Edit { path: p, source: "" }),
+  },
+}
+
+fn first_line(s: String) -> String = string.take(list.first(string.split(s, "\n")) ?? "", 80)
+
+test "sources are unwrapped and decoded" {
+  assert_eq(unwrap_source("```rust\nfn main() {}\n```"), "fn main() {}\n")
+  assert_eq(decode_source("line one\\nline two\\n"), "line one\nline two\n")
+}
+
+test "an edit is well formed with either a source or replacements, and not with neither" {
+  let whole = json.parse("{\"path\":\"a.almd\",\"source\":\"fn a() = 1\"}") ?? value.object([])
+  match edit_of(whole) { some(e) => assert_eq(e.source, "fn a() = 1"), none => assert(false) }
+
+  // `source` absent but replacements present: well formed, and the source is filled in
+  // later by `collect_edits`, which has the file to apply them against.
+  let reps = json.parse("{\"path\":\"a.almd\",\"replacements\":[{\"old\":\"1\",\"new\":\"2\"}]}") ?? value.object([])
+  match edit_of(reps) { some(e) => assert_eq(e.path, "a.almd"), none => assert(false) }
+  assert_eq(list.len(replacements_of(reps)), 1)
+
+  // A path and nothing else says no change at all.
+  let bare = json.parse("{\"path\":\"a.almd\"}") ?? value.object([])
+  assert(option.is_none(edit_of(bare)))
+  // An empty replacement list is the same as none.
+  let empty = json.parse("{\"path\":\"a.almd\",\"replacements\":[]}") ?? value.object([])
+  assert(option.is_none(edit_of(empty)))
+}

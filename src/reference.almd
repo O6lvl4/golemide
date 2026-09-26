@@ -78,10 +78,10 @@ effect fn in_project(root: String) -> Reference = {
   for rel in IN_PROJECT {
     if found.label == "" then {
       match fs.read_text(root + "/" + rel) {
-        ok(t) => if string.trim(t) != "" then found = { ...clip(t, rel), path: rel } else (),
+        ok(t) => if string.trim(t) != "" then found = { ...clip(t, rel), path: rel },
         err(_) => (),
       }
-    } else ()
+    }
   }
   found
 }
@@ -94,10 +94,10 @@ effect fn from_toolchain(root: String, language: String) -> Reference = {
       for cmd in commands {
         if found.label == "" then {
           let r = observe.run(cmd, root, 15000)!
-          if r.code == 0 and string.trim(r.stdout) != "" then found = clip(r.stdout, cmd) else ()
-        } else ()
+          if r.code == 0 and string.trim(r.stdout) != "" then found = clip(r.stdout, cmd)
+        }
       }
-    } else ()
+    }
   }
   found
 }

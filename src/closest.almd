@@ -1,0 +1,100 @@
+// What a refusal shows when a quote matches nowhere: the block of the file it most
+// likely meant.
+
+import self.ladder
+
+// ---- when nothing matched --------------------------------------------------------
+
+// A quote that matches nowhere is usually a quote from memory: of the file before the
+// caller's own last edit, or with a line paraphrased. Saying only "not found" sends the
+// caller back to read the file again, one round spent. Showing the block it most
+// likely meant lets the next quote be copied from the refusal itself.
+//
+// Measured 2026-09-23, emet on a Go LRU cache: the model quoted `Get` as it was before
+// its own previous edit, was told "could not find this text", and spent two more steps
+// re-reading the file before the edit landed.
+//
+// This runs on a refusal, and a refusal must stay cheap. Scoring every block of a file
+// took 2.7 s on a 5,000-line one, so the blocks scored are the few that some line of
+// the quote already points at exactly; a quote from memory is usually wrong in one line,
+// not in all of them. Only a small file is scanned whole when no line matches.
+let NEAREST_COMPARED_LINES = 6
+let NEAREST_CANDIDATES = 8
+let NEAREST_SCAN_LINES = 300
+let NEAREST_MAX_FILE_LINES = 20000
+let NEAREST_MIN_SIMILARITY = 0.5
+
+// Every line of the quote found in the file, trimmed, votes for the start it implies,
+// with a weight of one over the number of places it occurs: a line found once points
+// at one block, a line every function ends with points at none in particular. Braces
+// and blank lines vote for nothing, and a start whose votes add up to less than a line
+// found NEAREST_MAX_OCCURRENCES times is not a candidate -- no hint is better than one
+// that names the wrong block.
+//
+// Measured 2026-09-23 on 1,250 near-identical handlers: with plain counts, a quote whose
+// only exact line was a common `return` got a confident hint at the wrong handler.
+let NEAREST_MAX_OCCURRENCES = 5
+
+fn anchor_starts(lines: List[String], quoted: List[String]) -> List[Int] = {
+  var at: Map[String, List[Int]] = [:]
+  var i = 0
+  for l in lines {
+    let t = string.trim(l)
+    if string.len(t) > 2 then map.insert(at, t, (map.get(at, t) ?? []) + [i])
+    i = i + 1
+  }
+  var votes: Map[Int, Float] = [:]
+  var j = 0
+  for q in quoted {
+    let hits = map.get(at, string.trim(q)) ?? []
+    let weight = 1.0 / int.to_float(int.max(1, list.len(hits)))
+    for hit in hits {
+      if hit >= j then map.insert(votes, hit - j, (map.get(votes, hit - j) ?? 0.0) + weight)
+    }
+    j = j + 1
+  }
+  let enough = list.filter(map.entries(votes), (e) => e.1 * int.to_float(NEAREST_MAX_OCCURRENCES) >= 1.0)
+  list.take(list.map(list.sort_by(enough, (e) => 0.0 - e.1), (e) => e.0), NEAREST_CANDIDATES)
+}
+
+fn nearest_starts(lines: List[String], quoted: List[String]) -> List[Int] =
+  if list.len(lines) > NEAREST_MAX_FILE_LINES then []
+  else {
+    let anchored_at = anchor_starts(lines, quoted)
+    if list.is_empty(anchored_at) and list.len(lines) <= NEAREST_SCAN_LINES then list.range(0, list.len(lines)) else anchored_at
+  }
+
+fn window_score(lines: List[String], i: Int, want: List[String]) -> Float = {
+  let pairs = list.zip(list.slice(lines, i, i + list.len(want)), want)
+  let total = list.fold(pairs, 0.0, (acc, p) => acc + ladder.similarity(string.take(string.trim(p.0), 200), string.take(string.trim(p.1), 200)))
+  total / int.to_float(int.max(1, list.len(want)))
+}
+
+// The block of the quote's height whose lines are most like the quote's first lines,
+// numbered; "" when nothing is at least half alike.
+fn nearest(text: String, old: String) -> String = {
+  let lines = string.split(text, "\n")
+  let quoted = ladder.search_lines(old)
+  let want = list.take(quoted, NEAREST_COMPARED_LINES)
+  var best = -1
+  var best_score = NEAREST_MIN_SIMILARITY
+  for i in nearest_starts(lines, quoted) {
+    let s = window_score(lines, i, want)
+    if s > best_score or (s == best_score and best < 0) then { best = i; best_score = s }
+  }
+  if best < 0 then ""
+  else {
+    let block = list.slice(lines, best, int.min(list.len(lines), best + list.len(quoted)))
+    var out = ["the closest text in the file (lines " + int.to_string(best + 1) + "-" + int.to_string(best + list.len(block))
+      + ", " + int.to_string(float.to_int(best_score * 100.0)) + "% alike) is:"]
+    var n = best + 1
+    for l in block { list.push(out, string.pad_start(int.to_string(n), 5, " ") + "│ " + l); n = n + 1 }
+    string.join(out, "\n")
+  }
+}
+
+fn not_found(text: String, old: String) -> String = {
+  let hint = nearest(text, old)
+  "could not find this text in the file, so nothing was changed — quote it exactly as the file shows it, whitespace included: " + ladder.shown(old)
+    + (if hint == "" then "" else "\n" + hint)
+}

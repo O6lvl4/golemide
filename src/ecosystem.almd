@@ -1,0 +1,77 @@
+// Which ecosystem a project is: the marker file that says so and the test command it
+// implies, or, with no marker, the language most of its files are written in.
+
+import fs
+import json
+
+type Marker = { file: String, language: String, test_command: String, note: String }
+
+// Marker file → ecosystem, most specific first; the first match wins.
+let MARKERS = [
+  Marker { file: "almide.toml", language: "almide", test_command: "almide test", note: "sources under src/, tests under tests/; run one file with `almide run <file>`" },
+  Marker { file: "Cargo.toml", language: "rust", test_command: "cargo test", note: "sources under src/" },
+  Marker { file: "go.mod", language: "go", test_command: "go test ./...", note: "tests are *_test.go beside the source" },
+  Marker { file: "pyproject.toml", language: "python", test_command: "pytest -q", note: "" },
+  Marker { file: "setup.py", language: "python", test_command: "pytest -q", note: "" },
+  Marker { file: "setup.cfg", language: "python", test_command: "pytest -q", note: "" },
+  Marker { file: "Gemfile", language: "ruby", test_command: "bundle exec rspec", note: "" },
+  Marker { file: "pom.xml", language: "java", test_command: "mvn -q test", note: "" },
+  Marker { file: "build.gradle", language: "java", test_command: "gradle test", note: "" },
+  Marker { file: "build.gradle.kts", language: "kotlin", test_command: "gradle test", note: "" },
+  Marker { file: "composer.json", language: "php", test_command: "vendor/bin/phpunit", note: "" },
+  Marker { file: "mix.exs", language: "elixir", test_command: "mix test", note: "" },
+  Marker { file: "Package.swift", language: "swift", test_command: "swift test", note: "" },
+  Marker { file: "pubspec.yaml", language: "dart", test_command: "dart test", note: "" },
+  Marker { file: "deno.json", language: "typescript", test_command: "deno test", note: "" },
+  Marker { file: "package.json", language: "javascript", test_command: "", note: "read package.json scripts.test — do not assume npm test exists" },
+  Marker { file: "CMakeLists.txt", language: "c++", test_command: "ctest", note: "" },
+  Marker { file: "Makefile", language: "unknown", test_command: "", note: "check the Makefile for a test target" },
+]
+
+type Fingerprint = { marker: String, language: String, test_command: String, note: String }
+
+// package.json is the one marker whose test command is written inside it.
+effect fn package_json_test(path: String) -> String = match fs.read_text(path) {
+  err(_) => "",
+  ok(text) => match json.parse(text) { ok(pkg) => test_script_command(pkg), err(_) => "" },
+}
+
+fn test_script_command(pkg: Value) -> String = {
+  let script = match value.field(pkg, "scripts") { ok(s) => json.get_string(s, "test") ?? "", err(_) => "" }
+  let pm = list.first(string.split(json.get_string(pkg, "packageManager") ?? "", "@")) ?? ""
+  if script == "" or string.contains(string.to_lower(script), "no test specified") then ""
+  else (if list.contains(["pnpm", "yarn", "bun"], pm) then pm else "npm") + " test"
+}
+
+effect fn fingerprint(root: String) -> Fingerprint? = {
+  var found: Fingerprint? = none
+  for m in MARKERS {
+    if option.is_none(found) and fs.exists(root + "/" + m.file) then {
+      let cmd = if m.file == "package.json" then package_json_test(root + "/" + m.file)! else m.test_command
+      found = some(Fingerprint { marker: m.file, language: m.language, test_command: cmd, note: m.note })
+    }
+  }
+  found
+}
+
+// Source extension → language, used only when no marker file matched.
+let EXTENSION_LANGUAGE = [("almd", "almide"), ("rs", "rust"), ("go", "go"), ("py", "python"), ("rb", "ruby"), ("ts", "typescript"),
+  ("tsx", "typescript"), ("js", "javascript"), ("mjs", "javascript"), ("java", "java"), ("kt", "kotlin"), ("swift", "swift"),
+  ("cpp", "c++"), ("cc", "c++"), ("ex", "elixir"), ("exs", "elixir"), ("php", "php")]
+
+fn extension_of(path: String) -> String = {
+  let name = list.last(string.split(path, "/")) ?? path
+  match string.last_index_of(name, ".") {
+    some(i) => if i > 0 then string.to_lower(string.drop(name, i + 1)) else "",
+    none => "",
+  }
+}
+
+fn language_of_ext(ext: String) -> String? = option.map(list.find(EXTENSION_LANGUAGE, (p) => p.0 == ext), (p) => p.1)
+
+// The language most of these files are written in, if one dominates.
+fn language_from_files(files: List[String]) -> String? = {
+  var counts: Map[String, Int] = [:]
+  for l in list.filter_map(files, (f) => language_of_ext(extension_of(f))) { map.insert(counts, l, (map.get(counts, l) ?? 0) + 1) }
+  option.map(list.first(list.sort_by(map.entries(counts), (e) => 0 - e.1)), (e) => e.0)
+}

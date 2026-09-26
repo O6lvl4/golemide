@@ -1,0 +1,294 @@
+// What the model is shown and asked before it edits: the observation, the files it
+// chooses to read, rounds of looking around, and a failure's output made readable.
+
+import fs
+import json
+import regex
+import self.llm
+import self.ask
+import self.observe
+import self.explain
+import self.notes
+import self.paths
+import self.reading
+
+// Commands the model asks to run before it edits, so it can look at things `observe` did
+// not think to collect.
+//
+// Why this exists, measured. golemide only ever runs ONE command: the verify command. That
+// is what makes its "solved" trustworthy -- a success is always a command exiting zero --
+// and it is also what excludes it from a whole class of task. On Terminal-Bench 2.0 the
+// container ships no tests at all (they are injected after the agent exits), so there is no
+// verify command to have, and a run attempts nothing: measured, two trials, zero attempted.
+//
+// What Claude Code does there is not magic. It runs `ls`, compiles a file, executes it on a
+// small input, and builds its own partial signals out of what comes back. The capability is
+// choosing what to look at, and this is the smallest form of it.
+//
+// Read-only by convention, not by enforcement: the sandbox is the project directory and the
+// verify command already runs arbitrary shell, so a stricter promise here would be a
+// pretence. What IS enforced is the budget -- `--explore N` caps the rounds, default 0, so
+// the existing behaviour is unchanged unless asked for.
+let EXPLORE_SCHEMA = "{\"type\":\"object\",\"properties\":{\"commands\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Shell commands to run in the project root to understand the task. Prefer reading and running over guessing: ls, cat, compiling a file, executing it on a small input. At most 6.\"},\"reason\":{\"type\":\"string\",\"description\":\"What you are trying to find out.\"}},\"required\":[\"commands\",\"reason\"],\"additionalProperties\":false}"
+
+let EXPLORE_TIMEOUT_MS = 60000
+
+let EXPLORE_MAX_COMMANDS = 6
+
+let EXPLORE_OUTPUT_CHARS = 2000
+
+let SELECT_SCHEMA = "{\"type\":\"object\",\"properties\":{\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Paths copied exactly from the FILES list. No others.\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"files\",\"reason\"],\"additionalProperties\":false}"
+
+let SYSTEM = """
+You are a careful software engineer fixing one specific problem in an existing codebase.
+
+Rules that matter more than anything else:
+- Only claim things you can see in the material you were given. You were shown the real file list, the real file contents, and the real test output. Do not invent paths, symbols, commands or APIs.
+- Fix the actual cause. Making the test pass by deleting the test, deleting the import, inlining the function under test, or special-casing the test's inputs is a failure, not a fix.
+- Preserve everything you were not asked to change: imports, formatting, comments, unrelated functions. You are editing a file that other people work in.
+- When you emit a file's `source`, emit the whole file, exactly as it should appear on disk. When you emit `replacements`, copy `old` exactly from the file you were shown — from the text, not from memory — and make it long enough to occur only once.
+"""
+
+// A failing command that names a file nobody read is naming the next thing to
+// read. The set only grows, and only by what the failure actually mentioned.
+effect fn widened(obs: observe.Observation, verify: observe.CommandResult?, paths: List[String], max_files: Int, quiet: Bool) -> Result[List[String], String] = {
+  match verify {
+    none => ok(paths),
+    some(v) => {
+      let hay = v.stdout + "\n" + v.stderr
+      let fresh = list.filter(obs.files, (f) => string.contains(hay, f) and not list.contains(paths, f))
+      if list.is_empty(fresh) then ok(paths)
+      else {
+        notes.note(quiet, "failure names new files: " + string.join(fresh, ", "))!
+        ok(list.take(paths + fresh, max_files + 2))
+      }
+    },
+  }
+}
+
+fn schema(s: String) -> Value = json.parse(s) ?? value.object([])
+
+// How the observation is shown to the model. Facts, in a fixed order.
+//
+// `show_baseline` is true only on the first attempt. The baseline is captured once,
+// before any edit, so from attempt 2 on it is not current — and it was being sent
+// under the header `CURRENT TEST OUTPUT`, first in the prompt, ahead of the code. The
+// failure that is true by then is the one `attempt_record` puts in the history, so the
+// stale copy is dropped rather than restated: one failure per prompt, and the one that
+// is still happening.
+//
+// Two diagnostics with the wrong one labelled authoritative and placed first is worse
+// than its token count suggests — it invites the next attempt to repair a failure the
+// last attempt already moved.
+fn render_observation(obs: observe.Observation, task: String, baseline_excerpt: String, language_reference: String, show_baseline: Bool) -> String =
+  string.join(list.filter([
+    "=== TASK ===\n" + task,
+    project_section(obs),
+    language_reference,
+    "=== FILES (" + int.to_string(list.len(obs.files)) + ") ===\n" + string.join(obs.files, "\n") + (if obs.files_omitted != "" then "\n" + obs.files_omitted else ""),
+    if string.trim(obs.repo_map) != "" then "=== REPO MAP (ranked by how central each symbol is) ===\n" + obs.repo_map else "",
+    if show_baseline then baseline_section(obs, baseline_excerpt) else "",
+  ], (part) => part != ""), "\n\n")
+
+fn project_section(obs: observe.Observation) -> String = {
+  let fp_lang = option.map(obs.fingerprint, (f) => f.language) ?? "unknown"
+  let fp_marker = option.map(obs.fingerprint, (f) => f.marker) ?? "no marker file"
+  let fp_note = option.map(obs.fingerprint, (f) => f.note) ?? ""
+  "=== PROJECT ===\nroot: " + obs.root + "\nlanguage: " + fp_lang + " (from " + fp_marker + ")\n"
+    + (if fp_note != "" then "note: " + fp_note + "\n" else "")
+    + "verify command: " + (if obs.verify_command == "" then "(none)" else obs.verify_command)
+    + (if obs.verify_source == "user" then "  [given by the user — this is the command that decides success]"
+       else if obs.verify_source == "marker" then "  [inferred from the marker file]" else "")
+}
+
+fn baseline_section(obs: observe.Observation, excerpt: String) -> String = match obs.baseline {
+  some(b) => "=== CURRENT TEST OUTPUT (exit " + int.to_string(b.code) + (if b.timed_out then ", TIMED OUT" else "") + ") ===\n$ " + b.command + "\n" + (if excerpt == "" then "(no output)" else excerpt),
+  none => "",
+}
+
+// Drop the parts of a ctxgate summary that point at a vault we cannot read.
+fn strip_vault_header(s: String) -> String =
+  string.join(list.map(list.filter(string.split(s, "\n"), (l) => not (regex.is_match("^\\[ctxgate\\].*vaulted as ctx:", l) or regex.is_match("^\\s+full text: ctxgate show ", l) or regex.is_match("^\\s+source: ", l))), (l) => string.replace(l, " (see vault)", "")), "\n")
+
+// What the model is shown of a failing command's output: a ctxgate summary
+// when it is installed, the output is long, and the summary is actually a
+// summary (shorter than its input, and not emptied of the failure);
+// otherwise the excerpt.
+effect fn failure_view(command: String, raw: String, root: String, tail_lines: Int, quiet: Bool) -> String = {
+  let text = string.trim(raw)
+  var summary = ""
+  if string.len(text) > 2000 and reading.on_path("ctxgate")! then {
+    match fs.create_temp_file("golemide-out") {
+      ok(tmp) => {
+        let _ = fs.write(tmp, text)
+        let r = observe.run("ctxgate summarize " + observe.shell_quote(if command == "" then "verify" else command) + " < " + observe.shell_quote(tmp), root, 20000)!
+        let _ = fs.remove(tmp)
+        if r.code == 0 then summary = string.trim_end(strip_vault_header(r.stdout))
+      },
+      err(_) => (),
+    }
+  }
+  if summary != "" and string.len(summary) < string.len(text) and string.len(summary) >= 300 then {
+    notes.note(quiet, "failure output via ctxgate: " + int.to_string(string.len(text)) + " -> " + int.to_string(string.len(summary)) + " chars")!
+    summary
+  } else explain.failure_excerpt(text, tail_lines)
+}
+
+// Every source file, when there are few enough to just read them all (an
+// Exercism exercise plus scaffolding is under eight).
+let SKIP_SOURCES = "(^|/)(package(-lock)?\\.json|Cargo\\.(toml|lock)|go\\.(mod|sum)|pyproject\\.toml|setup\\.(py|cfg)|CMakeLists\\.txt|build\\.gradle|gradlew(\\.bat)?|\\.gitignore|\\.npmrc|\\.eslintrc|babel\\.config\\.js|jest\\.config\\.js|tsconfig\\.json|requirements\\.txt|Makefile)$"
+
+fn small_project_sources(obs: observe.Observation) -> List[String] = {
+  let files = list.filter(obs.files, (f) => not regex.is_match(SKIP_SOURCES, f) and not string.contains(f, "/.") and not string.starts_with(f, "."))
+  if list.len(files) <= 8 then files else []
+}
+
+// Project files whose path appears in the baseline output, longest first.
+fn files_named_in(obs: observe.Observation) -> List[String] = match obs.baseline {
+  none => [],
+  some(b) => {
+    let hay = b.stdout + "\n" + b.stderr
+    list.sort_by(list.filter(obs.files, (f) => string.contains(hay, f)), (f) => 0 - string.len(f))
+  },
+}
+
+// The files to read, with the one that supplied the language reference taken out.
+//
+// Its full text is already in the prompt under LANGUAGE REFERENCE, and reading it
+// again as source sends it twice on every attempt. On the Almide exercise benchmark
+// that duplicate is CHEATSHEET.md, 41,210 characters, against a 6-attempt budget.
+//
+// An empty `ref_path` changes nothing: only the in-project tier names a file inside
+// the project, and a configured or toolchain reference cannot collide with the list.
+fn paths_to_read(selected: List[String], ref_path: String) -> List[String] =
+  if ref_path == "" then selected
+  else list.filter(selected, (p) => paths.normalize_path(p) != ref_path)
+
+// One round of looking around: the model names commands, they run, their output comes back
+// as text for the next prompt.
+//
+// The output of each command is clipped. A single `find /` would otherwise fill the whole
+// budget with paths and crowd out the thing the model asked to see, and the clip is reported
+// so the model knows it is reading a fragment rather than a short answer.
+effect fn explore_round(creds: llm.Credentials, context: String, root: String, model: String,
+                        quiet: Bool) -> Result[(String, Float), String] = {
+  let prompt = context + "\n\n=== QUESTION ===\nBefore changing anything: which shell commands would tell you what you need to know?\nThey run in the project root. Read files, list directories, compile something, run it on a small input — whatever answers the question you actually have.\nAt most " + int.to_string(EXPLORE_MAX_COMMANDS) + ". Do not change any file yet."
+  match ask.ask_json(creds, prompt, schema(EXPLORE_SCHEMA), ask.Options { system: SYSTEM, model: model, max_output_tokens: 2048, reasoning_effort: "low" }) {
+    err(e) => { notes.note(quiet, "exploration failed: " + e)!; ok(("", 0.0)) },
+    ok(a) => {
+      let asked = list.take(list.map(json.get_array(a.value, "commands") ?? [], (v) => value.as_string(v) ?? ""), EXPLORE_MAX_COMMANDS)
+      let why = json.get_string(a.value, "reason") ?? ""
+      if list.is_empty(asked) then ok(("", a.cost_usd))
+      else {
+        if why != "" then notes.note(quiet, "looking for: " + why)!
+        var seen: List[String] = []
+        for c in list.filter(asked, (c) => string.trim(c) != "") { list.push(seen, ran(c, root, quiet)!) }
+        ok(("\n\n=== WHAT I RAN ===\n" + string.join(seen, "\n\n"), a.cost_usd))
+      }
+    },
+  }
+}
+
+// One command the model asked for, and what it printed, clipped.
+effect fn ran(c: String, root: String, quiet: Bool) -> String = {
+  notes.note(quiet, "$ " + c)!
+  let r = observe.run(c, root, EXPLORE_TIMEOUT_MS)!
+  let body = string.trim(r.stdout + (if string.trim(r.stderr) == "" then "" else "\n" + r.stderr))
+  let clipped = if string.len(body) > EXPLORE_OUTPUT_CHARS
+    then string.take(body, EXPLORE_OUTPUT_CHARS) + "\n… (clipped at " + int.to_string(EXPLORE_OUTPUT_CHARS) + " of " + int.to_string(string.len(body)) + " chars)"
+    else body
+  "$ " + c + "\n" + (if r.timed_out then "(timed out)" else if clipped == "" then "(no output, exit " + int.to_string(r.code) + ")" else clipped)
+}
+
+// Ask which files to read. The answer is checked against reality; a path
+// not in the list is dropped and said out loud.
+effect fn select_files(creds: llm.Credentials, context: String, obs: observe.Observation, max: Int, model: String, quiet: Bool) -> (List[String], Float) = {
+  let whole = small_project_sources(obs)
+  if not list.is_empty(whole) then {
+    notes.note(quiet, "small project: reading all " + int.to_string(list.len(whole)) + " source files, no selection call")!
+    (list.take(whole, max), 0.0)
+  } else {
+    let prompt = context + "\n\n=== QUESTION ===\nWhich files do you need to read to fix this? Choose at most " + int.to_string(max) + ".\nCopy each path exactly from the FILES list above. A path that is not in that list does not exist and will be discarded.\nPrefer the file the test output points at, plus whatever it calls."
+    let (picked, cost) = match ask.ask_json(creds, prompt, schema(SELECT_SCHEMA), ask.Options { system: SYSTEM, model: model, max_output_tokens: 2048, reasoning_effort: "low" }) {
+      ok(a) => {
+        notes.note_hedges(quiet, a.hedged, a.hedge_wins)!
+        (list.map(json.get_array(a.value, "files") ?? [], (v) => value.as_string(v) ?? ""), a.cost_usd)
+      },
+      err(e) => {
+        notes.note(quiet, "file selection failed: " + e)!
+        (([]: List[String]), 0.0)
+      },
+    }
+    let listed = on_the_list(obs, picked, quiet)!
+    (list.take(if list.is_empty(listed) then named_instead(obs, max, quiet)! else listed, max), cost)
+  }
+}
+
+// The picked paths that name a project file, each once.
+effect fn on_the_list(obs: observe.Observation, picked: List[String], quiet: Bool) -> List[String] = {
+  var out: List[String] = []
+  for raw in picked {
+    match listed(obs, paths.normalize_path(raw), quiet)! {
+      some(p) => if not list.contains(out, p) then list.push(out, p),
+      none => (),
+    }
+  }
+  out
+}
+
+effect fn listed(obs: observe.Observation, p: String, quiet: Bool) -> String? =
+  if list.contains(obs.files, p) then some(p)
+  else {
+    let matches = list.filter(obs.files, (f) => string.ends_with(f, "/" + p) or f == p)
+    if list.len(matches) == 1 then {
+      let m = list.first(matches) ?? p
+      notes.note(quiet, "resolved \"" + p + "\" -> " + m)!
+      some(m)
+    } else {
+      notes.note(quiet, "rejected " + p + ": not in the file list")!
+      none
+    }
+  }
+
+// Nothing picked that exists: the files the test output names, then the project's sources.
+effect fn named_instead(obs: observe.Observation, max: Int, quiet: Bool) -> List[String] = {
+  let out = list.take(list.fold(files_named_in(obs) + small_project_sources(obs), ([]: List[String]), (acc, f) => if list.contains(acc, f) then acc else acc + [f]), max)
+  if not list.is_empty(out) then notes.note(quiet, "selection empty; using files named in the test output")!
+  out
+}
+
+test "the reference's own file is not read again as source" {
+  let selected = ["CHEATSHEET.md", "roman_numerals.almd"]
+  assert_eq(paths_to_read(selected, "CHEATSHEET.md"), ["roman_numerals.almd"])
+  assert_eq(paths_to_read(["./CHEATSHEET.md", "x.almd"], "CHEATSHEET.md"), ["x.almd"])
+}
+
+test "a reference from outside the project filters nothing" {
+  let selected = ["CHEATSHEET.md", "roman_numerals.almd"]
+  assert_eq(paths_to_read(selected, ""), selected)
+  assert_eq(paths_to_read(selected, "docs/CHEATSHEET.md"), selected)
+}
+
+test "a retry is not shown the baseline output, which is no longer current" {
+  let baseline = observe.CommandResult { command: "almide test x.almd", code: 1,
+    stdout: "FAILED: expected 42 got 7", stderr: "", timed_out: false, duration_ms: 3, spawn_error: "" }
+  let obs = observe.Observation { root: ".", fingerprint: none, verify_command: "almide test x.almd",
+    verify_source: "user", files: ["x.almd"], files_omitted: "", repo_map: "", repo_map_warnings: [],
+    baseline: some(baseline), harness_broken: "" }
+
+  let first = render_observation(obs, "Fix it.", "FAILED: expected 42 got 7", "", true)
+  assert(string.contains(first, "CURRENT TEST OUTPUT"))
+  assert(string.contains(first, "expected 42 got 7"))
+
+  // The section goes entirely, not just its body: an empty `CURRENT TEST OUTPUT` header
+  // is the same lie with fewer characters.
+  let retry = render_observation(obs, "Fix it.", "", "", false)
+  assert(not string.contains(retry, "CURRENT TEST OUTPUT"))
+  assert(not string.contains(retry, "expected 42 got 7"))
+  assert(string.len(retry) < string.len(first))
+
+  // Everything a retry still needs is kept.
+  assert(string.contains(retry, "=== TASK ==="))
+  assert(string.contains(retry, "almide test x.almd"))
+  assert(string.contains(retry, "x.almd"))
+}

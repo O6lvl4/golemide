@@ -1,0 +1,121 @@
+// Which file an edit means: the path the model named, resolved to a file it was shown,
+// and when it names none of them, the shown file it probably meant.
+
+import self.ladder
+
+fn normalize_path(p: String) -> String = string.trim(string.strip_prefix(p, "./") ?? p)
+
+// The path the model named, resolved to a file it was actually shown.
+//
+// `select_files` already does this for the files-to-read answer — it resolves a bare
+// name against the project list and says `resolved "x" -> y`. The edit-application path
+// did not, so the same string was accepted in one place and refused in the other.
+//
+// Two shapes were measured being refused on files that plainly exist, across the
+// polyglot and Almide runs:
+//
+//   /tmp/pr-before/rust/two-bucket/src/lib.rs   the absolute path, which the prompt
+//                                               itself prints under `PROJECT / root:`.
+//                                               `fs.exists(root + "/" + p)` then joins a
+//                                               root onto an absolute path and asks
+//                                               about a path that cannot exist.  (9x)
+//   python/connect/connect.py                   the path from the benchmark's working
+//                                               directory, where the root IS
+//                                               python/connect.  (4x)
+//
+// 13 edits refused on files that were present and editable, each costing a round.
+//
+// Resolution is only ever to a member of `read` — the files shown completely — so a
+// resolved path is editable by construction, and this cannot widen what may be written.
+// A match must be UNIQUE: two candidates mean the name is ambiguous and the original is
+// returned so the caller refuses it, rather than guessing which file was meant.
+fn resolve_edit_path(raw: String, root: String, read: List[String]) -> String = {
+  let p = normalize_path(raw)
+  // An absolute path under the root is that file, named the long way.
+  let bare_root = string.strip_suffix(root, "/") ?? root
+  let unrooted = match string.strip_prefix(p, bare_root + "/") {
+    some(rest) => normalize_path(rest),
+    none => p,
+  }
+  if list.contains(read, unrooted) then unrooted
+  else {
+    // `a/b/c.py` naming the shown `c.py`, or the shown `b/c.py` naming `c.py`.
+    let tails = list.filter(read, (f) => string.ends_with(unrooted, "/" + f))
+    let heads = list.filter(read, (f) => string.ends_with(f, "/" + unrooted))
+    if list.len(tails) == 1 then list.first(tails) ?? unrooted
+    else if list.len(heads) == 1 then list.first(heads) ?? unrooted
+    else unrooted
+  }
+}
+
+// A shown file the refused path was probably meant to name: within three edits of it,
+// on the whole path or on the file name. Offered in the refusal so the repair round has
+// a name to use instead of a category of mistake to avoid. Levenshtein 3 is ZCode's
+// threshold for the same suggestion; nothing here was measured to choose it.
+let NEAREST_PATH_EDITS = 3
+
+fn base_name(p: String) -> String = match string.last_index_of(p, "/") { some(i) => string.drop(p, i + 1), none => p }
+
+fn nearest_shown(p: String, read: List[String]) -> String? = {
+  let scored = list.map(read, (f) => (int.min(ladder.levenshtein(p, f), ladder.levenshtein(base_name(p), base_name(f))), f))
+  let close = list.filter(scored, (s) => s.0 <= NEAREST_PATH_EDITS)
+  match list.min(list.map(close, (s) => s.0)) {
+    none => none,
+    some(best) => {
+      let at_best = list.filter(close, (s) => s.0 == best)
+      // Two files equally close is no suggestion: naming one would be a guess.
+      if list.len(at_best) == 1 then option.map(list.first(at_best), (s) => s.1) else none
+    },
+  }
+}
+
+fn did_you_mean(p: String, read: List[String]) -> String =
+  match nearest_shown(p, read) { some(f) => " — did you mean `" + f + "`?", none => "" }
+
+test "a refused path names the shown file it was probably meant to be" {
+  let read = ["src/lib.rs", "src/main.rs", "tests/clamp.rs"]
+
+  // One letter off, on the file name.
+  assert_eq(nearest_shown("src/lib.ts", read), some("src/lib.rs"))
+  // A directory the model invented, around the right name.
+  assert_eq(nearest_shown("crate/lib.rs", read), some("src/lib.rs"))
+  // Far from everything: no suggestion, rather than the least-wrong one.
+  assert_eq(nearest_shown("README.md", read), none)
+  // Equally close to two files is a guess, and a guess is not offered.
+  assert_eq(nearest_shown("src/lxb.rs", ["src/lib.rs", "src/lab.rs"]), none)
+  // Nothing shown, nothing to suggest.
+  assert_eq(nearest_shown("src/lib.rs", []), none)
+
+  assert_eq(did_you_mean("src/lib.ts", read), " — did you mean `src/lib.rs`?")
+  assert_eq(did_you_mean("README.md", read), "")
+}
+
+test "an edit path is resolved to the file it was shown, or left to be refused" {
+  let read = ["gigasecond.cpp", "gigasecond.h"]
+  let root = "/tmp/pc/cpp/gigasecond"
+
+  // The absolute path the prompt prints under `PROJECT / root:`. Measured 9 times.
+  assert_eq(resolve_edit_path("/tmp/pc/cpp/gigasecond/gigasecond.cpp", root, read), "gigasecond.cpp")
+  // A trailing slash on the root must not defeat the strip.
+  assert_eq(resolve_edit_path("/tmp/pc/cpp/gigasecond/gigasecond.h", root + "/", read), "gigasecond.h")
+  // Already correct, and `./`-prefixed, are both unchanged.
+  assert_eq(resolve_edit_path("gigasecond.cpp", root, read), "gigasecond.cpp")
+  assert_eq(resolve_edit_path("./gigasecond.cpp", root, read), "gigasecond.cpp")
+
+  // The path from the benchmark's working directory, where the root IS python/connect.
+  // Measured 4 times.
+  assert_eq(resolve_edit_path("python/connect/connect.py", "/w/python/connect", ["connect.py"]), "connect.py")
+  // And the other direction: a bare name for a file shown at a nested path.
+  assert_eq(resolve_edit_path("lib.rs", "/w/r", ["src/lib.rs"]), "src/lib.rs")
+
+  // What must still be refused. A file that does not exist is returned unchanged so the
+  // caller rejects it -- resolution must not invent a target.
+  assert_eq(resolve_edit_path("boost/date_time/posix_time/posix_time.hpp", root, read),
+            "boost/date_time/posix_time/posix_time.hpp")
+  // Ambiguity is not resolved by guessing: two shown files end with "/mod.rs".
+  assert_eq(resolve_edit_path("mod.rs", "/w", ["a/mod.rs", "b/mod.rs"]), "mod.rs")
+  // A path outside the root keeps its shape and stays refusable.
+  assert_eq(resolve_edit_path("/etc/passwd", root, read), "/etc/passwd")
+  // Nothing was shown, so nothing resolves.
+  assert_eq(resolve_edit_path("gigasecond.cpp", root, []), "gigasecond.cpp")
+}

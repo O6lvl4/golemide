@@ -19,7 +19,10 @@
 import fs
 import json
 import value
-import self.solve
+import self.editing
+import self.saving
+import self.paths
+import self.diffing
 import self.replace
 import self.gate
 
@@ -32,20 +35,20 @@ fn refused(code: Int, path: String, why: String) -> EditResult =
 effect fn apply_request(root: String, input: String, allow_create: Bool) -> EditResult =
   match json.parse(input) {
     err(e) => refused(2, "", "the input is not JSON: " + e),
-    ok(v) => match solve.edit_of(v) {
+    ok(v) => match editing.edit_of(v) {
       none => refused(2, json.get_string(v, "path") ?? "", "an edit is a `path` and either `source` or a non-empty `replacements` list"),
-      some(e0) => apply_edit(root, e0, solve.replacements_of(v), allow_create)!,
+      some(e0) => apply_edit(root, e0, editing.replacements_of(v), allow_create)!,
     },
   }
 
-effect fn apply_edit(root: String, e0: solve.Edit, reps: List[replace.Replacement], allow_create: Bool) -> EditResult = {
-  let p = solve.resolve_edit_path(e0.path, root, [])
+effect fn apply_edit(root: String, e0: editing.Edit, reps: List[replace.Replacement], allow_create: Bool) -> EditResult = {
+  let p = paths.resolve_edit_path(e0.path, root, [])
   let full = root + "/" + p
   if string.starts_with(p, "/") or string.contains(p, "..") then refused(1, p, "outside the project root")
   else if not fs.exists(full) and not allow_create then refused(1, p, "does not exist (pass --create to make a new file)")
   else {
     let before = fs.read_text(full) ?? ""
-    let (source, matched, rep_error) = if list.is_empty(reps) then (solve.unwrap_source(e0.source), [], "")
+    let (source, matched, rep_error) = if list.is_empty(reps) then (editing.unwrap_source(e0.source), [], "")
       else match replace.apply(before, reps) {
         ok(a) => (a.0, a.1, ""),
         err(why) => ("", [], why),
@@ -54,16 +57,16 @@ effect fn apply_edit(root: String, e0: solve.Edit, reps: List[replace.Replacemen
     // as "identical to the current file", the caller would go looking for a fault.
     let all_made = rep_error == "" and not list.is_empty(reps) and source == before
       and list.len(list.filter(matched, (m) => string.contains(m, "already made"))) == list.len(reps)
-    let degenerate = if rep_error != "" or all_made then "" else solve.degenerate_write(root, p, source)!
-    let was = solve.mtime_of(full)!
+    let degenerate = if rep_error != "" or all_made then "" else editing.degenerate_write(root, p, source)!
+    let was = saving.mtime_of(full)!
     if rep_error != "" then refused(1, p, rep_error)
     else if all_made then EditResult { code: 0, path: p, error: "", bytes: string.len(before), checked_by: "", matched: matched, diff: "" }
     else if degenerate != "" then refused(1, p, degenerate)
     else match gate.write_checked(full, source, true) {
       err(why) => refused(1, p, "refused by the syntax gate: " + why),
       ok(w) => {
-        solve.bump_mtimes(root, [(p, was)])!
-        EditResult { code: 0, path: p, error: "", bytes: w.bytes, checked_by: w.checked, matched: matched, diff: solve.unified_diff(before, source) }
+        saving.bump_mtimes(root, [(p, was)])!
+        EditResult { code: 0, path: p, error: "", bytes: w.bytes, checked_by: w.checked, matched: matched, diff: diffing.unified_diff(before, source) }
       },
     }
   }

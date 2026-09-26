@@ -1,0 +1,99 @@
+// What the model is asked to change, and what a failed attempt is told: the edit
+// question, the polish question, the record of an attempt, and a refusal explained.
+
+import self.observe
+import self.explain
+import self.notes
+import self.editing
+
+// Two ways to say a change, and the model picks. `source` replaces the file;
+// `replacements` name exact text to swap. Being refused as a FRAGMENT accounts for 13% of
+// failures overall and 18% of runs on files above 6 KB, against 2% under 2 KB
+// (bench/failures.py) -- so the schema offers a way to change three lines without
+// restating four hundred. A worthwhile 13%, not the harness's main gap; that file records
+// why an earlier reading of 72% was a bug in the census rather than a finding.
+let EDIT_SCHEMA = "{\"type\":\"object\",\"properties\":{\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"The file's path, exactly as it appears in the FILES list.\"},\"source\":{\"type\":\"string\",\"description\":\"Every line of the file as it should exist on disk after your change — the COMPLETE file. Never a file name, never a description of the change, never only the changed part. Use this for a small file or a rewrite; for a targeted change in a large file use replacements instead.\"},\"replacements\":{\"type\":\"array\",\"description\":\"Targeted edits to this file, applied in order. Use these INSTEAD OF source when the file is large and your change is local. Do not send both.\",\"items\":{\"type\":\"object\",\"properties\":{\"old\":{\"type\":\"string\",\"description\":\"Text copied EXACTLY from the file as shown, whitespace included, and long enough to occur exactly once. If it occurs twice the edit is refused, so include surrounding lines to make it unique.\"},\"new\":{\"type\":\"string\",\"description\":\"What replaces it. Empty string deletes the matched text.\"}},\"required\":[\"old\",\"new\"],\"additionalProperties\":false}}},\"required\":[\"path\"],\"additionalProperties\":false}},\"explanation\":{\"type\":\"string\"}},\"required\":[\"edits\",\"explanation\"],\"additionalProperties\":false}"
+
+// What is asked once the verify command already passes. It names the shapes
+// the loop actually produces — the reference run reached cyclomatic 22 with a
+// nesting depth of 5 — and it forbids the one thing that would make the
+// simplification worthless.
+let POLISH_QUESTION = """
+The verify command already passes. Do not change what the code does.
+Say the same thing more simply, and only where it is genuinely simpler:
+- fewer branches on the same path, and less nesting inside them
+- a long function split where it already has a seam, not for its own sake
+- a helper that only unwraps a value the language can unwrap directly, removed
+- a loop that recomputes something the standard library already provides, replaced
+Behaviour is fixed. Every test must still pass for the same reason it passes
+now, and every input that works today must still work. If the code is already
+simple, emit no edits and say so.
+"""
+
+// Everything the model is asked, in one place: the observation, the files as
+// they are now, what has already been tried, and the question. A polish is not
+// shown the history — it is not continuing a repair, it is restating a result.
+fn edit_prompt(context: String, block: String, history: String, polishing: Bool, verify_command: String) -> String =
+  context + "\n\n=== FILE CONTENTS ===\n" + (if block == "" then "(none could be read)" else block)
+    + (if history != "" and not polishing then "\n\n=== WHAT HAS ALREADY BEEN TRIED ===\n" + history else "")
+    + "\n\n=== QUESTION ===\n" + (if polishing then POLISH_QUESTION else "Fix the problem.")
+    + "\nFor each file you change, say the change in ONE of two ways.\n"
+    + "  `source` — the file's COMPLETE new contents: every line from the first to the last, including the lines you did not touch. The text replaces the file on disk exactly as written, so a fragment or a single function will be discarded.\n"
+    + "  `replacements` — a list of {old, new}. `old` is text copied exactly from the file as shown, whitespace included, long enough to occur exactly once; `new` is what goes there. Text that occurs twice is refused, so include surrounding lines.\n"
+    + "Prefer `replacements` when the file is long and your change is local: restating four hundred lines to change three is where this goes wrong. Prefer `source` for a small file or a genuine rewrite. Never send both for one file.\n"
+    + "If what you must write is too large to emit in one answer, BUILD IT ACROSS ATTEMPTS. Write a first part now, ending with a marker line you choose, and say in `explanation` what comes next. On the following attempt, replace that marker with the next part and a new marker. A file grown in four attempts is finished; one answer that gets cut off mid-way is nothing.\n"
+    + "Change as few files as possible. Do not touch a file you were not shown completely. TRUNCATED files are read-only context.\n"
+    + (if verify_command != "" then "Success is \"" + verify_command + "\" exiting zero for the right reason.\n" else "")
+    + "Do not weaken, skip or delete tests to achieve it."
+
+let SAME_FAILURE_NOTE = "THE SAME FAILURE AS THE PREVIOUS ATTEMPT. The last change did not move it. Do not adjust the previous approach; replace it — a different algorithm, data structure or control flow. Re-read the failing test's expectation first.\n"
+
+// What the next attempt is told about this one: what it meant to do, what it
+// actually changed, what was refused before it ran, and why it failed. The
+// diff is here because the history once said only the intent and the result,
+// so the next attempt read the file it had just written as if it were the
+// original.
+fn attempt_record(n: Int, edits: List[editing.Edit], explanation: String, diffs: List[String],
+                  rejected: List[editing.Rejected], why: String, repeat_note: String, explanations: String) -> String = {
+  let touched = if list.is_empty(edits) then "(nothing)" else string.join(list.map(edits, (e) => e.path), ", ")
+  let rejection_note = if list.is_empty(rejected) then ""
+    else "rejected before it ran:\n" + string.join(list.map(rejected, (r) => "  " + r.path + ": " + r.why), "\n") + "\n"
+  "\nAttempt " + int.to_string(n) + ": edited " + touched + "\n"
+    + (if explanation != "" then "intent: " + explanation + "\n" else "")
+    + (if list.is_empty(diffs) then "" else "changed:\n" + string.join(diffs, "\n") + "\n")
+    + rejection_note + "result: FAILED\n" + why + "\n" + repeat_note + explanations
+}
+
+// What to say when every edit came back the wrong shape. The rejection reasons
+// are raw compiler output; the same diagnostic codes are explained for a
+// failing verify command, and an answer refused by the gate is where they are
+// needed most — three measured runs re-asked twice on the same E005 without
+// ever being told what it meant.
+// The diagnostics in `text`, explained, for whichever language this project is.
+// Nothing is said when the toolchain has no explainer or the text holds no code
+// it recognises.
+effect fn explained_diagnostics(obs: observe.Observation, text: String, label: String, quiet: Bool) -> Result[String, String] = {
+  match explain.explainer_for(option.map(obs.fingerprint, (f) => f.language) ?? "") {
+    none => ok(""),
+    some(ex) => {
+      let found = explain.explain(text, ex, obs.root)!
+      if list.is_empty(found) then ok("")
+      else {
+        notes.note(quiet, label + string.join(list.map(found, (f) => f.code), ", "))!
+        ok("\n" + explain.render_explanations(found) + "\n")
+      }
+    },
+  }
+}
+
+effect fn repair_prompt(obs: observe.Observation, rejected: List[editing.Rejected], quiet: Bool) -> Result[String, String] = {
+  let explained = explained_diagnostics(obs, string.join(list.map(rejected, (x) => x.why), "\n"), "explained the rejection: ", quiet)!
+  ok("\n\n=== YOUR PREVIOUS ANSWER WAS REJECTED ===\n"
+    + string.join(list.map(rejected, (x) => "- " + x.path + ": " + x.why), "\n") + explained
+    + "\nAnswer again. For each file, `source` is the complete file.")
+}
+
+fn hang_note(timeout_ms: Int) -> String =
+  "the verify command did not finish within " + int.to_string(timeout_ms / 1000) + "s and was stopped: "
+    + "the code as written most likely loops forever, waits for input, or is far too slow. "
+    + "Look for a loop whose index or condition never changes.\n"

@@ -114,7 +114,7 @@ effect fn run_observe(a: Args) -> Result[Unit, String] = {
   println("files: " + int.to_string(list.len(obs.files)))
   for f in list.take(obs.files, 40) { println("  " + f) }
   match obs.baseline { some(b) => println("baseline: exit " + int.to_string(b.code) + " in " + int.to_string(b.duration_ms) + "ms"), none => () }
-  if obs.harness_broken != "" then println("harness broken: " + obs.harness_broken) else ()
+  if obs.harness_broken != "" then println("harness broken: " + obs.harness_broken)
   for w in obs.repo_map_warnings { println("warning: " + w) }
   println("repo map: " + int.to_string(string.len(obs.repo_map)) + " chars")
   ok(())
@@ -158,7 +158,7 @@ effect fn solve_with(a: Args, task: String, root: String, quiet: Bool, polish_on
     eprintln("verify:  " + (if obs.verify_command == "" then "(none)" else obs.verify_command) + " [" + obs.verify_source + "]")
     match obs.baseline { some(b) => eprintln("baseline: exit " + int.to_string(b.code) + " in " + int.to_string(b.duration_ms) + "ms"), none => () }
     for w in obs.repo_map_warnings { eprintln("warning: " + w) }
-  } else ()
+  }
   let json_mode = map.contains(a.flags, "json")
   match stop_before(obs, map.contains(a.flags, "create"), polish_only) {
     some(s) => {

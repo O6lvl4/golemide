@@ -1,0 +1,103 @@
+// What is on disk around a write: the files as they were, to roll a polish back or to
+// diff the whole run against, and mtimes pushed on so a compile cache cannot go stale.
+
+import fs
+import env
+import self.observe
+import self.diffing
+
+// The files as they stand right now, so a polish that breaks the build can be
+// undone. A file that cannot be read is not snapshotted and not restored.
+effect fn snapshot_of(root: String, paths: List[String]) -> List[(String, String)] = {
+  var out: List[(String, String)] = []
+  for p in paths {
+    match fs.read_text(root + "/" + p) {
+      ok(t) => list.push(out, (p, t)),
+      err(_) => (),
+    }
+  }
+  out
+}
+
+effect fn restore(root: String, snapshot: List[(String, String)]) -> Unit = {
+  for entry in snapshot {
+    let (p, text) = entry
+    let _ = fs.write(root + "/" + p, text)
+    ()
+  }
+}
+
+// Force a written file's mtime into a later whole second, so a cache keyed on
+// (mtime seconds, size) — Python's .pyc, and others — cannot serve a stale compile of
+// a same-size rewrite. That can only happen when the write landed in the same second
+// as the version it replaced, so only those files wait. `before` is each path with its
+// mtime in seconds before the write, -1 for a file that did not exist.
+//
+// Every write used to wait for the next second. Measured 2026-09-23: that was 0.9 s of
+// each `golemide edit`, whatever the file's size, where the edit itself took 50 ms.
+effect fn bump_mtimes(root: String, before: List[(String, Int)]) -> Unit = {
+  var same: List[String] = []
+  for (p, was) in before {
+    if was >= 0 and (fs.modified_at(root + "/" + p) ?? -1) == was then list.push(same, p)
+  }
+  if list.is_empty(same) then () else {
+    env.sleep_ms(1100 - (env.millis() % 1000))
+    for p in same { let _ = observe.run("touch " + observe.shell_quote(p), root, 5000)!; () }
+  }
+}
+
+effect fn mtime_of(path: String) -> Int = fs.modified_at(path) ?? -1
+
+// Each file as it was before this run first wrote it; "" for one that did not exist.
+effect fn remember_originals(root: String, originals: List[(String, String)], paths: List[String]) -> List[(String, String)] = {
+  var out = originals
+  for p in paths {
+    if not list.any(out, (o) => o.0 == p) then list.push(out, (p, fs.read_text(root + "/" + p) ?? ""))
+  }
+  out
+}
+
+// The polish pass is only safe if the rollback is: a simplification that stops
+// the verify command must leave the passing files exactly as they were.
+test "a snapshot restores the files it captured, and ignores the ones it could not read" {
+  let root = fs.create_temp_dir("golemide-polish")!
+  fs.write(root + "/kept.almd", "fn passing() -> Int = 1\n")!
+  let snap = snapshot_of(root, ["kept.almd", "never-existed.almd"])!
+  assert_eq(list.len(snap), 1)
+  fs.write(root + "/kept.almd", "fn broken() -> Int = \n")!
+  restore(root, snap)!
+  assert_eq(fs.read_text(root + "/kept.almd") ?? "", "fn passing() -> Int = 1\n")
+}
+
+test "the run diff runs from before the first write to the end, over every attempt" {
+  let root = fs.create_temp_dir("golemide-rundiff")!
+  fs.write(root + "/a.py", "x = 1\ny = 1\n")!
+  var originals = remember_originals(root, [], ["a.py", "new.py"])!
+  fs.write(root + "/a.py", "x = 2\ny = 1\n")!
+  // A second attempt writes a.py again: the original stays the one from before the first.
+  originals = remember_originals(root, originals, ["a.py"])!
+  fs.write(root + "/a.py", "x = 2\ny = 2\n")!
+  fs.write(root + "/new.py", "z = 3\n")!
+  let d = diffing.run_diff(root, originals)!
+  assert(string.contains(d, "--- a.py ---"))
+  assert(string.contains(d, "- x = 1"))
+  assert(string.contains(d, "+ y = 2"))
+  assert(string.contains(d, "--- new.py ---\n+ z = 3"))
+  fs.remove_all(root)!
+}
+
+test "a rewrite in the same second is pushed to a later one, and nothing else waits" {
+  let root = fs.create_temp_dir("golemide-mtime")!
+  fs.write(root + "/a.py", "x = 1\n")!
+  let was = mtime_of(root + "/a.py")!
+  fs.write(root + "/a.py", "x = 2\n")!
+  bump_mtimes(root, [("a.py", was)])!
+  // Whether or not the rewrite crossed a second on its own, it now reads as newer.
+  assert(mtime_of(root + "/a.py")! > was)
+  // A file that did not exist before has no stale compile to fear.
+  fs.write(root + "/b.py", "y = 1\n")!
+  let t0 = env.millis()
+  bump_mtimes(root, [("b.py", -1)])!
+  assert(env.millis() - t0 < 500)
+  fs.remove_all(root)!
+}

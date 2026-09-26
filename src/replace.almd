@@ -9,20 +9,12 @@
 // throwing away a correct edit for a transcription slip -- and a refusal here costs the
 // repair round, and often the attempt.
 //
-// So the match is loosened in fixed steps, exact first and the broadest last, and the
-// first step that finds the text exactly once wins. Every step returns the file's OWN
-// text for the region, never the model's, so what is replaced is what is on disk; and a
-// step that finds the text more than once refuses, the same as an exact match would,
-// because guessing which occurrence silently edits the wrong one.
-//
-// The ladder is ZCode's (zai-org/ZCode, `edit-matchers.ts`, Apache-2.0), with two
-// changes for this harness. Line endings are normalised on both sides and restored on
-// the way out, because the file the model saw was shown raw and its answer comes back
-// through JSON. And when the match succeeded only by ignoring indentation, `new` is
-// re-indented by the same amount -- ZCode leaves it as the model wrote it, which in
-// Python or Almide turns a found edit into a syntax error one step later.
+// So the match is loosened in fixed steps (ladder.almd), and the first step that finds
+// the text exactly once wins.
 
 import regex
+import self.ladder
+import self.closest
 
 type Replacement = { old: String, new: String }
 
@@ -31,326 +23,33 @@ type Replacement = { old: String, new: String }
 // the log prints, because a match that was not exact is worth saying out loud.
 type Found = { actual: String, at: Int, how: String, by_lines: Bool }
 
-// A candidate from one step: the file's text at an offset.
-type Candidate = { actual: String, at: Int }
-
-let BLOCK_ANCHOR_MIN_SIMILARITY = 0.8
-
-fn normalize_newlines(s: String) -> String = string.replace(s, "\r\n", "\n")
-
-// ---- the steps -------------------------------------------------------------------
-
-fn exact(text: String, needle: String) -> List[Candidate] = {
-  var out: List[Candidate] = []
-  if needle == "" then out
-  else {
-    var from = 0
-    var going = true
-    while going {
-      match string.index_of(string.drop(text, from), needle) {
-        none => { going = false },
-        some(i) => { list.push(out, Candidate { actual: needle, at: from + i }); from = from + i + string.len(needle) },
-      }
-    }
-    out
-  }
-}
-
-// `12: foo`, `12\tfoo` and hew's `12│ foo` — every line must carry one, or none is
-// stripped: a number at the start of one line of code is code.
-let LINE_NUMBER_PREFIX = "^\\s*[0-9]+(: |\\t|│ ?)"
-
-fn strip_line_numbers(needle: String) -> String? = {
-  let lines = string.split(needle, "\n")
-  let numbered = list.filter(lines, (l) => l != "")
-  if list.is_empty(numbered) or not list.all(numbered, (l) => regex.is_match(LINE_NUMBER_PREFIX, l)) then none
-  else some(string.join(list.map(lines, (l) => regex.replace(LINE_NUMBER_PREFIX, l, "")), "\n"))
-}
-
-// `\n` written as backslash-n, and the same for tab, quotes and the backslash itself.
-// One pass, left to right, so `\\n` stays a backslash followed by an n.
-fn unescape(needle: String) -> String = {
-  let cs = string.chars(needle)
-  var out: List[String] = []
-  var i = 0
-  while i < list.len(cs) {
-    let c = list.get(cs, i) ?? ""
-    let nxt = list.get(cs, i + 1) ?? ""
-    if c == "\\" and nxt == "n" then { list.push(out, "\n"); i = i + 2 }
-    else if c == "\\" and nxt == "t" then { list.push(out, "\t"); i = i + 2 }
-    else if c == "\\" and (nxt == "\"" or nxt == "'" or nxt == "`" or nxt == "\\" or nxt == "$") then { list.push(out, nxt); i = i + 2 }
-    else { list.push(out, c); i = i + 1 }
-  }
-  string.join(out, "")
-}
-
-// The line-based steps compare blocks of the same height, and hand back the file's own
-// lines for the block. `offsets` is where each line starts, computed once per file.
-fn line_offsets(lines: List[String]) -> List[Int] = {
-  var out: List[Int] = []
-  var at = 0
-  for l in lines {
-    list.push(out, at)
-    at = at + string.len(l) + 1
-  }
-  out
-}
-
-fn search_lines(needle: String) -> List[String] = {
-  let ls = string.split(needle, "\n")
-  if list.len(ls) > 0 and (list.last(ls) ?? "") == "" then list.take(ls, list.len(ls) - 1) else ls
-}
-
-// Every line-based step accepts a block only if its first line equals the quote's once
-// both are trimmed, so that is checked before a block is cut out. Measured 2026-09-23:
-// without it, a three-line quote that matched nowhere took 1.3 s on a 5,000-line file.
-fn blocks_where(text: String, needle: String, min_height: Int, accept: fn(List[String], List[String]) -> Bool) -> List[Candidate] = {
-  let lines = string.split(text, "\n")
-  let want = search_lines(needle)
-  let k = list.len(want)
-  let first = string.trim(list.first(want) ?? "")
-  var out: List[Candidate] = []
-  if k < min_height then out
-  else {
-    let offsets = line_offsets(lines)
-    var i = 0
-    while i + k <= list.len(lines) {
-      if string.trim(list.get(lines, i) ?? "") == first then {
-        let block = list.slice(lines, i, i + k)
-        if accept(block, want) then list.push(out, Candidate { actual: string.join(block, "\n"), at: list.get(offsets, i) ?? 0 }) else ()
-      } else ()
-      i = i + 1
-    }
-    out
-  }
-}
-
-fn same_trimmed(block: List[String], want: List[String]) -> Bool =
-  list.all(list.zip(block, want), (p) => string.trim(p.0) == string.trim(p.1))
-
-fn leading_ws(l: String) -> Int = string.len(l) - string.len(string.trim_start(l))
-
-// The indent every non-blank line shares. Blank lines say nothing about it.
-fn common_indent(lines: List[String]) -> String = {
-  let code = list.filter(lines, (l) => string.trim(l) != "")
-  match list.min(list.map(code, leading_ws)) {
-    none => "",
-    some(n) => string.take(list.first(code) ?? "", n),
-  }
-}
-
-fn dedent(lines: List[String]) -> String = {
-  let n = string.len(common_indent(lines))
-  string.join(list.map(lines, (l) => if string.trim(l) == "" then l else string.drop(l, n)), "\n")
-}
-
-fn same_dedented(block: List[String], want: List[String]) -> Bool = dedent(block) == dedent(want)
-
-fn levenshtein(a: String, b: String) -> Int = {
-  let xs = string.chars(a)
-  let ys = string.chars(b)
-  let m = list.len(ys)
-  var prev: List[Int] = list.range(0, m + 1)
-  var i = 1
-  while i <= list.len(xs) {
-    var cur: List[Int] = [i]
-    var j = 1
-    while j <= m {
-      let cost = if (list.get(xs, i - 1) ?? "") == (list.get(ys, j - 1) ?? "") then 0 else 1
-      let v = int.min(int.min((list.get(prev, j) ?? 0) + 1, (list.get(cur, j - 1) ?? 0) + 1), (list.get(prev, j - 1) ?? 0) + cost)
-      list.push(cur, v)
-      j = j + 1
-    }
-    prev = cur
-    i = i + 1
-  }
-  list.get(prev, m) ?? 0
-}
-
-fn similarity(a: String, b: String) -> Float = {
-  let n = int.max(string.len(a), string.len(b))
-  if a == b or n == 0 then 1.0 else 1.0 - int.to_float(levenshtein(a, b)) / int.to_float(n)
-}
-
-// First and last lines equal once trimmed, and the lines between close enough on
-// average: the shape of a block the model paraphrased in the middle.
-fn anchored(block: List[String], want: List[String]) -> Bool = {
-  let k = list.len(want)
-  if string.trim(list.first(block) ?? "") != string.trim(list.first(want) ?? "") then false
-  else if string.trim(list.last(block) ?? "") != string.trim(list.last(want) ?? "") then false
-  else if k <= 2 then true
-  else {
-    let middle = list.slice(list.zip(block, want), 1, k - 1)
-    let total = list.fold(middle, 0.0, (acc, p) => acc + similarity(string.trim(p.0), string.trim(p.1)))
-    total / int.to_float(k - 2) >= BLOCK_ANCHOR_MIN_SIMILARITY
-  }
-}
-
-// Typographic punctuation a model writes when it re-types code, mapped to the ASCII the
-// code has: curly quotes, the dashes, and the wide and non-breaking spaces. One character
-// for one, so an offset in the mapped text is the same offset in the file. From Codex's
-// apply_patch (openai/codex, `seek_sequence.rs`), which tries this last.
-fn plain_char(c: String) -> String =
-  if c == "\u{2018}" or c == "\u{2019}" or c == "\u{201A}" or c == "\u{201B}" or c == "\u{2032}" then "'"
-  else if c == "\u{201C}" or c == "\u{201D}" or c == "\u{201E}" or c == "\u{201F}" or c == "\u{2033}" then "\""
-  else if c == "\u{2010}" or c == "\u{2011}" or c == "\u{2012}" or c == "\u{2013}" or c == "\u{2014}" or c == "\u{2015}" or c == "\u{2212}" then "-"
-  else if c == "\u{00A0}" or c == "\u{2007}" or c == "\u{202F}" or c == "\u{2002}" or c == "\u{2003}" or c == "\u{2009}" then " "
-  else c
-
-fn plain(s: String) -> String = string.join(list.map(string.chars(s), plain_char), "")
-
-fn plain_punctuation(text: String, needle: String) -> List[Candidate] = {
-  let t = plain(text)
-  let n = plain(needle)
-  if t == text and n == needle then []
-  else list.map(exact(t, n), (c) => Candidate { actual: string.slice(text, c.at, c.at + string.len(n)), at: c.at })
-}
-
-// ---- the ladder ------------------------------------------------------------------
-
-// `by_lines` marks the steps that matched by ignoring the model's indentation: only
-// there does `new` need re-indenting, and a prefix-stripped `old` must not be.
-// The uniform-indent step comes before the trimmed one because it is the stricter
-// of the two: anything it accepts, the trimmed step also accepts, so the other order
-// would never reach it.
-type Step = { how: String, by_lines: Bool, run: fn(String, String) -> List[Candidate] }
-
-let STEPS: List[Step] = [
-  Step { how: "", by_lines: false, run: exact },
-  Step { how: "after stripping line-number prefixes", by_lines: false, run: (t, n) => match strip_line_numbers(n) { some(s) => if s == n then [] else exact(t, s), none => [] } },
-  Step { how: "after unescaping \\n, \\t and quotes", by_lines: false, run: (t, n) => { let u = unescape(n); if u == n then [] else exact(t, u) } },
-  Step { how: "ignoring a uniform indentation change", by_lines: true, run: (t, n) => blocks_where(t, n, 2, same_dedented) },
-  Step { how: "ignoring leading and trailing whitespace on each line", by_lines: true, run: (t, n) => blocks_where(t, n, 1, same_trimmed) },
-  Step { how: "by its first and last lines, with the middle at least 80% similar", by_lines: true, run: (t, n) => blocks_where(t, n, 3, anchored) },
-  Step { how: "reading typographic quotes, dashes and spaces as plain ones", by_lines: false, run: plain_punctuation },
-]
-
-fn shown(s: String) -> String = "\"" + string.take(s, 120) + "\""
-
-// ---- when nothing matched --------------------------------------------------------
-
-// A quote that matches nowhere is usually a quote from memory: of the file before the
-// caller's own last edit, or with a line paraphrased. Saying only "not found" sends the
-// caller back to read the file again, one round spent. Showing the block it most
-// likely meant lets the next quote be copied from the refusal itself.
-//
-// Measured 2026-09-23, emet on a Go LRU cache: the model quoted `Get` as it was before
-// its own previous edit, was told "could not find this text", and spent two more steps
-// re-reading the file before the edit landed.
-//
-// This runs on a refusal, and a refusal must stay cheap. Scoring every block of a file
-// took 2.7 s on a 5,000-line one, so the blocks scored are the few that some line of
-// the quote already points at exactly; a quote from memory is usually wrong in one line,
-// not in all of them. Only a small file is scanned whole when no line matches.
-let NEAREST_COMPARED_LINES = 6
-let NEAREST_CANDIDATES = 8
-let NEAREST_SCAN_LINES = 300
-let NEAREST_MAX_FILE_LINES = 20000
-let NEAREST_MIN_SIMILARITY = 0.5
-
-// Every line of the quote found in the file, trimmed, votes for the start it implies,
-// with a weight of one over the number of places it occurs: a line found once points
-// at one block, a line every function ends with points at none in particular. Braces
-// and blank lines vote for nothing, and a start whose votes add up to less than a line
-// found NEAREST_MAX_OCCURRENCES times is not a candidate -- no hint is better than one
-// that names the wrong block.
-//
-// Measured 2026-09-23 on 1,250 near-identical handlers: with plain counts, a quote whose
-// only exact line was a common `return` got a confident hint at the wrong handler.
-let NEAREST_MAX_OCCURRENCES = 5
-
-fn anchor_starts(lines: List[String], quoted: List[String]) -> List[Int] = {
-  var at: Map[String, List[Int]] = [:]
-  var i = 0
-  for l in lines {
-    let t = string.trim(l)
-    if string.len(t) > 2 then map.insert(at, t, (map.get(at, t) ?? []) + [i]) else ()
-    i = i + 1
-  }
-  var votes: Map[Int, Float] = [:]
-  var j = 0
-  for q in quoted {
-    let hits = map.get(at, string.trim(q)) ?? []
-    let weight = 1.0 / int.to_float(int.max(1, list.len(hits)))
-    for hit in hits {
-      if hit >= j then map.insert(votes, hit - j, (map.get(votes, hit - j) ?? 0.0) + weight) else ()
-    }
-    j = j + 1
-  }
-  let enough = list.filter(map.entries(votes), (e) => e.1 * int.to_float(NEAREST_MAX_OCCURRENCES) >= 1.0)
-  list.take(list.map(list.sort_by(enough, (e) => 0.0 - e.1), (e) => e.0), NEAREST_CANDIDATES)
-}
-
-fn nearest_starts(lines: List[String], quoted: List[String]) -> List[Int] =
-  if list.len(lines) > NEAREST_MAX_FILE_LINES then []
-  else {
-    let anchored_at = anchor_starts(lines, quoted)
-    if list.is_empty(anchored_at) and list.len(lines) <= NEAREST_SCAN_LINES then list.range(0, list.len(lines)) else anchored_at
-  }
-
-fn window_score(lines: List[String], i: Int, want: List[String]) -> Float = {
-  let pairs = list.zip(list.slice(lines, i, i + list.len(want)), want)
-  let total = list.fold(pairs, 0.0, (acc, p) => acc + similarity(string.take(string.trim(p.0), 200), string.take(string.trim(p.1), 200)))
-  total / int.to_float(int.max(1, list.len(want)))
-}
-
-// The block of the quote's height whose lines are most like the quote's first lines,
-// numbered; "" when nothing is at least half alike.
-fn nearest(text: String, old: String) -> String = {
-  let lines = string.split(text, "\n")
-  let quoted = search_lines(old)
-  let want = list.take(quoted, NEAREST_COMPARED_LINES)
-  var best = -1
-  var best_score = NEAREST_MIN_SIMILARITY
-  for i in nearest_starts(lines, quoted) {
-    let s = window_score(lines, i, want)
-    if s > best_score or (s == best_score and best < 0) then { best = i; best_score = s } else ()
-  }
-  if best < 0 then ""
-  else {
-    let block = list.slice(lines, best, int.min(list.len(lines), best + list.len(quoted)))
-    var out = ["the closest text in the file (lines " + int.to_string(best + 1) + "-" + int.to_string(best + list.len(block))
-      + ", " + int.to_string(float.to_int(best_score * 100.0)) + "% alike) is:"]
-    var n = best + 1
-    for l in block { list.push(out, string.pad_start(int.to_string(n), 5, " ") + "│ " + l); n = n + 1 }
-    string.join(out, "\n")
-  }
-}
-
-fn not_found(text: String, old: String) -> String = {
-  let hint = nearest(text, old)
-  "could not find this text in the file, so nothing was changed — quote it exactly as the file shows it, whitespace included: " + shown(old)
-    + (if hint == "" then "" else "\n" + hint)
-}
-
 fn line_of(text: String, at: Int) -> Int = list.len(string.split(string.take(text, at), "\n"))
 
 // Where `old` is in `text`, or why it is not. The first step with any candidate
 // decides: one is the match, several is a refusal. A later step is never consulted to
 // break a tie, because a broader reading of the same text cannot make it less ambiguous.
-fn find(text: String, old: String) -> Result[Found, String] = {
-  var out: Result[Found, String] = err(not_found(text, old))
-  var settled = false
-  for step in STEPS {
-    if settled then ()
-    else {
-      let cs = step.run(text, old)
-      if list.len(cs) == 1 then { let c = list.first(cs) ?? Candidate { actual: old, at: 0 }; out = ok(Found { actual: c.actual, at: c.at, how: step.how, by_lines: step.by_lines }); settled = true }
-      else if list.len(cs) > 1 then {
-        let at_lines = list.map(list.take(cs, 8), (c) => int.to_string(line_of(text, c.at)))
-        out = err("this text appears " + int.to_string(list.len(cs)) + " times (at lines " + string.join(at_lines, ", ") + (if list.len(cs) > 8 then ", …" else "") + ")" + (if step.how == "" then "" else " (" + step.how + ")") + ", so it does not say which one to change — include enough surrounding lines to make it unique: " + shown(old))
-        settled = true
-      } else ()
+fn find(text: String, old: String) -> Result[Found, String] = found_on(text, old, ladder.STEPS)
+
+fn found_on(text: String, old: String, steps: List[ladder.Rung]) -> Result[Found, String] = match list.first(steps) {
+  none => err(closest.not_found(text, old)),
+  some(step) => {
+    let cs = step.run(text, old)
+    if list.is_empty(cs) then found_on(text, old, list.drop(steps, 1))
+    else if list.len(cs) == 1 then {
+      let c = list.first(cs) ?? ladder.Candidate { actual: old, at: 0 }
+      ok(Found { actual: c.actual, at: c.at, how: step.how, by_lines: step.by_lines })
+    } else {
+      let at_lines = list.map(list.take(cs, 8), (c) => int.to_string(line_of(text, c.at)))
+      err("this text appears " + int.to_string(list.len(cs)) + " times (at lines " + string.join(at_lines, ", ") + (if list.len(cs) > 8 then ", …" else "") + ")" + (if step.how == "" then "" else " (" + step.how + ")") + ", so it does not say which one to change — include enough surrounding lines to make it unique: " + ladder.shown(old))
     }
-  }
-  out
+  },
 }
 
 // `new` as the model wrote it carries the indentation of `old` as the model wrote it.
 // If `old` was found only by ignoring that indentation, `new` is shifted the same way.
 fn reindent(new: String, old: String, actual: String) -> String = {
-  let from = common_indent(search_lines(old))
-  let to = common_indent(search_lines(actual))
+  let from = ladder.common_indent(ladder.search_lines(old))
+  let to = ladder.common_indent(ladder.search_lines(actual))
   if from == to or new == "" then new
   else string.join(list.map(string.split(new, "\n"), (l) =>
     if string.trim(l) == "" then l
@@ -380,9 +79,9 @@ fn placeholder_in(new: String, old: String) -> String = {
 let ALREADY_MIN_CHARS = 20
 
 fn already_applied(text: String, r: Replacement) -> Bool = {
-  let new = string.trim(normalize_newlines(r.new))
-  string.len(new) >= ALREADY_MIN_CHARS and not string.contains(normalize_newlines(r.old), new)
-    and list.len(exact(text, new)) == 1
+  let new = string.trim(ladder.normalize_newlines(r.new))
+  string.len(new) >= ALREADY_MIN_CHARS and not string.contains(ladder.normalize_newlines(r.old), new)
+    and list.len(ladder.exact(text, new)) == 1
 }
 
 // Which replacement of a batch a refusal is about, and that nothing was written.
@@ -395,36 +94,39 @@ fn in_batch(e: String, n: Int, total: Int) -> String =
 // one may target text an earlier one introduced. The first failure stops the batch and
 // reports; a file is never left half-edited. The notes say which replacements needed a
 // loosened match and how, and which were found already made, so the log can say so.
+type Applying = { text: String, notes: List[String], failure: String }
+
 fn apply(current: String, reps: List[Replacement]) -> Result[(String, List[String]), String] = {
-  let crlf = string.contains(current, "\r\n")
-  var text = normalize_newlines(current)
-  var notes: List[String] = []
-  var failure = ""
+  var st = Applying { text: ladder.normalize_newlines(current), notes: [], failure: "" }
   var n = 0
-  let total = list.len(reps)
   for r in reps {
     n = n + 1
-    let stand_in = placeholder_in(r.new, r.old)
-    if failure != "" then ()
-    else if r.old == "" then failure = in_batch("a replacement had an empty `old`; it must be the exact text to find", n, total)
-    else if stand_in != "" then failure = in_batch("`new` has a placeholder line, " + shown(stand_in) + ": `new` replaces `old` whole, so the code that line stands for would be deleted. Write that code out, or make `old` smaller so `new` needs no placeholder.", n, total)
-    else match find(text, normalize_newlines(r.old)) {
-      err(e) => if already_applied(text, r) then list.push(notes, "replacement " + int.to_string(n) + " was already made: its `old` is not in the file and its `new` is, so it was skipped")
-        else { failure = in_batch(e, n, total) },
-      ok(f) => {
-        if f.how != "" then list.push(notes, "replacement " + int.to_string(n) + " matched " + f.how) else ()
-        let new = if f.by_lines then reindent(normalize_newlines(r.new), normalize_newlines(r.old), f.actual) else normalize_newlines(r.new)
-        // Deleting whole lines: an `old` that names the lines but not the newline after
-        // them would otherwise leave a blank line where the code was.
-        let end = f.at + string.len(f.actual)
-        let whole_lines = (f.at == 0 or string.slice(text, f.at - 1, f.at) == "\n") and not string.ends_with(f.actual, "\n")
-        let eat = if new == "" and whole_lines and string.slice(text, end, end + 1) == "\n" then 1 else 0
-        text = string.take(text, f.at) + new + string.drop(text, end + eat)
-      },
-    }
+    if st.failure == "" then { st = one_applied(st, r, n, list.len(reps)) }
   }
-  if failure != "" then err(failure)
-  else ok((if crlf then string.replace(text, "\n", "\r\n") else text, notes))
+  if st.failure != "" then err(st.failure)
+  else ok((if string.contains(current, "\r\n") then string.replace(st.text, "\n", "\r\n") else st.text, st.notes))
+}
+
+fn one_applied(st: Applying, r: Replacement, n: Int, total: Int) -> Applying = {
+  let stand_in = placeholder_in(r.new, r.old)
+  let label = "replacement " + int.to_string(n)
+  if r.old == "" then { ...st, failure: in_batch("a replacement had an empty `old`; it must be the exact text to find", n, total) }
+  else if stand_in != "" then { ...st, failure: in_batch("`new` has a placeholder line, " + ladder.shown(stand_in) + ": `new` replaces `old` whole, so the code that line stands for would be deleted. Write that code out, or make `old` smaller so `new` needs no placeholder.", n, total) }
+  else match find(st.text, ladder.normalize_newlines(r.old)) {
+    err(e) => if already_applied(st.text, r) then { ...st, notes: st.notes + [label + " was already made: its `old` is not in the file and its `new` is, so it was skipped"] }
+      else { ...st, failure: in_batch(e, n, total) },
+    ok(f) => spliced({ ...st, notes: if f.how == "" then st.notes else st.notes + [label + " matched " + f.how] }, r, f),
+  }
+}
+
+fn spliced(st: Applying, r: Replacement, f: Found) -> Applying = {
+  let new = if f.by_lines then reindent(ladder.normalize_newlines(r.new), ladder.normalize_newlines(r.old), f.actual) else ladder.normalize_newlines(r.new)
+  // Deleting whole lines: an `old` that names the lines but not the newline after
+  // them would otherwise leave a blank line where the code was.
+  let end = f.at + string.len(f.actual)
+  let whole_lines = (f.at == 0 or string.slice(st.text, f.at - 1, f.at) == "\n") and not string.ends_with(f.actual, "\n")
+  let eat = if new == "" and whole_lines and string.slice(st.text, end, end + 1) == "\n" then 1 else 0
+  { ...st, text: string.take(st.text, f.at) + new + string.drop(st.text, end + eat) }
 }
 
 // ---- tests -----------------------------------------------------------------------
@@ -555,15 +257,6 @@ test "in a long file the hint comes from the lines the quote got right" {
   assert(not string.contains(vague, "closest"))
 }
 
-test "levenshtein, for the path suggestions and the anchored middle" {
-  assert_eq(levenshtein("", ""), 0)
-  assert_eq(levenshtein("kitten", "sitting"), 3)
-  assert_eq(levenshtein("abc", ""), 3)
-  assert_eq(levenshtein("gigasecond.cpp", "gigasecond.hpp"), 1)
-  assert(similarity("return 1", "return 1") == 1.0)
-  assert(similarity("return 1", "return 12") > 0.8)
-  assert(similarity("abc", "xyz") == 0.0)
-}
 
 test "a quote that differs from the file only in typographic punctuation is found" {
   let file = "msg = \"it's done - really\"\nx = 1\n"

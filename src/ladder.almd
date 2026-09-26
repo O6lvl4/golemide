@@ -1,0 +1,227 @@
+// The ladder a replacement's `old` is looked for on, when the model did not copy it exactly.
+//
+// The match is loosened in fixed steps, exact first and the broadest last, and the
+// first step that finds the text exactly once wins. Every step returns the file's OWN
+// text for the region, never the model's, so what is replaced is what is on disk; and a
+// step that finds the text more than once refuses, the same as an exact match would,
+// because guessing which occurrence silently edits the wrong one.
+//
+// The ladder is ZCode's (zai-org/ZCode, `edit-matchers.ts`, Apache-2.0), with two
+// changes for this harness. Line endings are normalised on both sides and restored on
+// the way out, because the file the model saw was shown raw and its answer comes back
+// through JSON. And when the match succeeded only by ignoring indentation, `new` is
+// re-indented by the same amount -- ZCode leaves it as the model wrote it, which in
+// Python or Almide turns a found edit into a syntax error one step later.
+
+import regex
+
+// A candidate from one step: the file's text at an offset.
+type Candidate = { actual: String, at: Int }
+
+let BLOCK_ANCHOR_MIN_SIMILARITY = 0.8
+
+fn normalize_newlines(s: String) -> String = string.replace(s, "\r\n", "\n")
+
+// ---- the steps -------------------------------------------------------------------
+
+fn exact(text: String, needle: String) -> List[Candidate] = {
+  var out: List[Candidate] = []
+  if needle == "" then out
+  else {
+    var from = 0
+    var going = true
+    while going {
+      match string.index_of(string.drop(text, from), needle) {
+        none => { going = false },
+        some(i) => { list.push(out, Candidate { actual: needle, at: from + i }); from = from + i + string.len(needle) },
+      }
+    }
+    out
+  }
+}
+
+// `12: foo`, `12\tfoo` and hew's `12│ foo` — every line must carry one, or none is
+// stripped: a number at the start of one line of code is code.
+let LINE_NUMBER_PREFIX = "^\\s*[0-9]+(: |\\t|│ ?)"
+
+fn strip_line_numbers(needle: String) -> String? = {
+  let lines = string.split(needle, "\n")
+  let numbered = list.filter(lines, (l) => l != "")
+  if list.is_empty(numbered) or not list.all(numbered, (l) => regex.is_match(LINE_NUMBER_PREFIX, l)) then none
+  else some(string.join(list.map(lines, (l) => regex.replace(LINE_NUMBER_PREFIX, l, "")), "\n"))
+}
+
+// `\n` written as backslash-n, and the same for tab, quotes and the backslash itself.
+// One pass, left to right, so `\\n` stays a backslash followed by an n.
+let ESCAPED: List[(String, String)] = [("n", "\n"), ("t", "\t"), ("\"", "\""), ("'", "'"), ("`", "`"), ("\\", "\\"), ("$", "$")]
+
+fn escaped(c: String) -> String? = option.map(list.find(ESCAPED, (e) => e.0 == c), (e) => e.1)
+
+fn unescape(needle: String) -> String = {
+  let cs = string.chars(needle)
+  var out: List[String] = []
+  var i = 0
+  while i < list.len(cs) {
+    let c = list.get(cs, i) ?? ""
+    match (if c == "\\" then escaped(list.get(cs, i + 1) ?? "") else none) {
+      some(e) => { list.push(out, e); i = i + 2 },
+      none => { list.push(out, c); i = i + 1 },
+    }
+  }
+  string.join(out, "")
+}
+
+// The line-based steps compare blocks of the same height, and hand back the file's own
+// lines for the block. `offsets` is where each line starts, computed once per file.
+fn line_offsets(lines: List[String]) -> List[Int] = {
+  var out: List[Int] = []
+  var at = 0
+  for l in lines {
+    list.push(out, at)
+    at = at + string.len(l) + 1
+  }
+  out
+}
+
+fn search_lines(needle: String) -> List[String] = {
+  let ls = string.split(needle, "\n")
+  if list.len(ls) > 0 and (list.last(ls) ?? "") == "" then list.take(ls, list.len(ls) - 1) else ls
+}
+
+// Every line-based step accepts a block only if its first line equals the quote's once
+// both are trimmed, so that is checked before a block is cut out. Measured 2026-09-23:
+// without it, a three-line quote that matched nowhere took 1.3 s on a 5,000-line file.
+fn blocks_where(text: String, needle: String, min_height: Int, accept: fn(List[String], List[String]) -> Bool) -> List[Candidate] = {
+  let lines = string.split(text, "\n")
+  let want = search_lines(needle)
+  let k = list.len(want)
+  let first = string.trim(list.first(want) ?? "")
+  var out: List[Candidate] = []
+  if k < min_height then out
+  else {
+    let offsets = line_offsets(lines)
+    var i = 0
+    while i + k <= list.len(lines) {
+      if string.trim(list.get(lines, i) ?? "") == first then {
+        let block = list.slice(lines, i, i + k)
+        if accept(block, want) then list.push(out, Candidate { actual: string.join(block, "\n"), at: list.get(offsets, i) ?? 0 })
+      }
+      i = i + 1
+    }
+    out
+  }
+}
+
+fn same_trimmed(block: List[String], want: List[String]) -> Bool =
+  list.all(list.zip(block, want), (p) => string.trim(p.0) == string.trim(p.1))
+
+fn leading_ws(l: String) -> Int = string.len(l) - string.len(string.trim_start(l))
+
+// The indent every non-blank line shares. Blank lines say nothing about it.
+fn common_indent(lines: List[String]) -> String = {
+  let code = list.filter(lines, (l) => string.trim(l) != "")
+  match list.min(list.map(code, leading_ws)) {
+    none => "",
+    some(n) => string.take(list.first(code) ?? "", n),
+  }
+}
+
+fn dedent(lines: List[String]) -> String = {
+  let n = string.len(common_indent(lines))
+  string.join(list.map(lines, (l) => if string.trim(l) == "" then l else string.drop(l, n)), "\n")
+}
+
+fn same_dedented(block: List[String], want: List[String]) -> Bool = dedent(block) == dedent(want)
+
+fn levenshtein(a: String, b: String) -> Int = {
+  let xs = string.chars(a)
+  let ys = string.chars(b)
+  let m = list.len(ys)
+  var prev: List[Int] = list.range(0, m + 1)
+  var i = 1
+  while i <= list.len(xs) {
+    var cur: List[Int] = [i]
+    var j = 1
+    while j <= m {
+      let cost = if (list.get(xs, i - 1) ?? "") == (list.get(ys, j - 1) ?? "") then 0 else 1
+      let v = int.min(int.min((list.get(prev, j) ?? 0) + 1, (list.get(cur, j - 1) ?? 0) + 1), (list.get(prev, j - 1) ?? 0) + cost)
+      list.push(cur, v)
+      j = j + 1
+    }
+    prev = cur
+    i = i + 1
+  }
+  list.get(prev, m) ?? 0
+}
+
+fn similarity(a: String, b: String) -> Float = {
+  let n = int.max(string.len(a), string.len(b))
+  if a == b or n == 0 then 1.0 else 1.0 - int.to_float(levenshtein(a, b)) / int.to_float(n)
+}
+
+// First and last lines equal once trimmed, and the lines between close enough on
+// average: the shape of a block the model paraphrased in the middle.
+fn anchored(block: List[String], want: List[String]) -> Bool = {
+  let k = list.len(want)
+  if string.trim(list.first(block) ?? "") != string.trim(list.first(want) ?? "") then false
+  else if string.trim(list.last(block) ?? "") != string.trim(list.last(want) ?? "") then false
+  else if k <= 2 then true
+  else {
+    let middle = list.slice(list.zip(block, want), 1, k - 1)
+    let total = list.fold(middle, 0.0, (acc, p) => acc + similarity(string.trim(p.0), string.trim(p.1)))
+    total / int.to_float(k - 2) >= BLOCK_ANCHOR_MIN_SIMILARITY
+  }
+}
+
+// Typographic punctuation a model writes when it re-types code, mapped to the ASCII the
+// code has: curly quotes, the dashes, and the wide and non-breaking spaces. One character
+// for one, so an offset in the mapped text is the same offset in the file. From Codex's
+// apply_patch (openai/codex, `seek_sequence.rs`), which tries this last.
+let PLAIN: List[(String, List[String])] = [
+  ("'", ["\u{2018}", "\u{2019}", "\u{201A}", "\u{201B}", "\u{2032}"]),
+  ("\"", ["\u{201C}", "\u{201D}", "\u{201E}", "\u{201F}", "\u{2033}"]),
+  ("-", ["\u{2010}", "\u{2011}", "\u{2012}", "\u{2013}", "\u{2014}", "\u{2015}", "\u{2212}"]),
+  (" ", ["\u{00A0}", "\u{2007}", "\u{202F}", "\u{2002}", "\u{2003}", "\u{2009}"]),
+]
+
+fn plain_char(c: String) -> String = match list.find(PLAIN, (p) => list.contains(p.1, c)) { some(p) => p.0, none => c }
+
+fn plain(s: String) -> String = string.join(list.map(string.chars(s), plain_char), "")
+
+fn plain_punctuation(text: String, needle: String) -> List[Candidate] = {
+  let t = plain(text)
+  let n = plain(needle)
+  if t == text and n == needle then []
+  else list.map(exact(t, n), (c) => Candidate { actual: string.slice(text, c.at, c.at + string.len(n)), at: c.at })
+}
+
+// ---- the ladder ------------------------------------------------------------------
+
+// `by_lines` marks the steps that matched by ignoring the model's indentation: only
+// there does `new` need re-indenting, and a prefix-stripped `old` must not be.
+// The uniform-indent step comes before the trimmed one because it is the stricter
+// of the two: anything it accepts, the trimmed step also accepts, so the other order
+// would never reach it.
+type Rung = { how: String, by_lines: Bool, run: fn(String, String) -> List[Candidate] }
+
+let STEPS: List[Rung] = [
+  Rung { how: "", by_lines: false, run: exact },
+  Rung { how: "after stripping line-number prefixes", by_lines: false, run: (t, n) => match strip_line_numbers(n) { some(s) => if s == n then [] else exact(t, s), none => [] } },
+  Rung { how: "after unescaping \\n, \\t and quotes", by_lines: false, run: (t, n) => { let u = unescape(n); if u == n then [] else exact(t, u) } },
+  Rung { how: "ignoring a uniform indentation change", by_lines: true, run: (t, n) => blocks_where(t, n, 2, same_dedented) },
+  Rung { how: "ignoring leading and trailing whitespace on each line", by_lines: true, run: (t, n) => blocks_where(t, n, 1, same_trimmed) },
+  Rung { how: "by its first and last lines, with the middle at least 80% similar", by_lines: true, run: (t, n) => blocks_where(t, n, 3, anchored) },
+  Rung { how: "reading typographic quotes, dashes and spaces as plain ones", by_lines: false, run: plain_punctuation },
+]
+
+fn shown(s: String) -> String = "\"" + string.take(s, 120) + "\""
+
+test "levenshtein, for the path suggestions and the anchored middle" {
+  assert_eq(levenshtein("", ""), 0)
+  assert_eq(levenshtein("kitten", "sitting"), 3)
+  assert_eq(levenshtein("abc", ""), 3)
+  assert_eq(levenshtein("gigasecond.cpp", "gigasecond.hpp"), 1)
+  assert(similarity("return 1", "return 1") == 1.0)
+  assert(similarity("return 1", "return 12") > 0.8)
+  assert(similarity("abc", "xyz") == 0.0)
+}

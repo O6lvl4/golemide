@@ -1,0 +1,91 @@
+// What a run did: each attempt, the outcome, the files it changed, and the reasons to
+// distrust a pass.
+
+import fs
+import regex
+import self.observe
+import self.editing
+import self.prompts
+
+type Attempt = { n: Int, read: List[String], edits: List[editing.Edit], rejected: List[editing.Rejected], apply_error: String,
+  verify: observe.CommandResult?, ok: Bool, cost_usd: Float, ms: Int, explanation: String }
+
+// `polish_kept` is none when no polish ran, and otherwise says whether the
+// simpler version survived its verify. Without it a rolled-back polish
+// reports the same headline as one that was kept.
+// `unverified` means edits were written and nothing could check them: there was no
+// verify command, given or inferred. It is its own state, not a failure and not a
+// success, because the caller is the only one who can find out which it was.
+// `diff` is what the run did, each written file from before its first write to now.
+// The per-attempt diffs say what each attempt changed from the last; a caller that
+// has to explain the result needs the sum.
+type Outcome = { ok: Bool, attempts: List[Attempt], changed: List[String], cost_usd: Float, wall_ms: Int, warnings: List[String], harness_broken: String, polish_kept: Bool?, unverified: Bool, diff: String, throttled: Int, throttled_ms: Int }
+
+
+// Files git reports as modified or untracked, relative to the project root.
+effect fn changed_files(root: String) -> List[String] = {
+  let r = observe.run("git status --porcelain 2>/dev/null", root, 15000)!
+  list.filter(list.map(string.split(r.stdout, "\n"), (l) => string.trim(string.drop(l, 3))), (f) => f != "" and not observe.is_noise(f) and not observe.is_noise((string.strip_suffix(f, "/") ?? f) + "/x"))
+}
+
+// What the run changed. In a repository git says, and it also sees files no edit accounts
+// for, which is why it is asked. Outside one `git status` prints nothing, and a run that
+// wrote a file reported `changed: []` -- to a caller reading the JSON, the same as a run
+// that wrote none. There the paths the attempts wrote stand in, except after a polish
+// that was rolled back, which put back exactly what it found.
+effect fn changed_by_run(root: String, dirty_before: List[String], attempts: List[Attempt], rolled_back: Bool) -> List[String] = {
+  let in_repo = observe.run("git rev-parse --is-inside-work-tree 2>/dev/null", root, 15000)!.code == 0
+  if in_repo then list.filter(changed_files(root)!, (f) => not list.contains(dirty_before, f))
+  else if rolled_back then []
+  else list.unique(list.flat_map(attempts, (t) => list.map(t.edits, (e) => e.path)))
+}
+
+// Reasons to distrust a passing test: tests touched, files changed that no
+// edit accounts for, an edited file that lost most of its lines.
+effect fn gaming_warnings(obs: observe.Observation, attempts: List[Attempt], changed: List[String]) -> List[String] = {
+  var out: List[String] = []
+  let touched = list.filter(changed, (f) => regex.is_match("(^|/)(tests?|spec|__tests__)/", string.to_lower(f)) or regex.is_match("(_test\\.|\\.test\\.|_spec\\.|\\.spec\\.|^test_)", string.to_lower(list.last(string.split(f, "/")) ?? "")))
+  if not list.is_empty(touched) then list.push(out, "test files were modified: " + string.join(touched, ", ") + " — check the fix is in the code, not the test")
+  let edited = list.flatten(list.map(attempts, (a) => list.map(a.edits, (e) => e.path)))
+  let unexplained = list.filter(changed, (f) => not list.contains(edited, f))
+  if not list.is_empty(unexplained) then list.push(out, "files changed that no edit accounts for: " + string.join(unexplained, ", "))
+  for a in attempts {
+    for e in a.edits {
+      let r = observe.read_for_model(obs.root, e.path, 24000)!
+      if r.error == "" and list.len(string.split(r.content, "\n")) * 10 < list.len(string.split(e.source, "\n")) * 6 then list.push(out, e.path + " lost a large fraction of its lines")
+    }
+  }
+  out
+}
+
+// Why the verify command counts as broken after an edit, or "". A timeout is the
+// harness's fault only when the untouched code timed out too: when the baseline run
+// finished and failed, the edit is what made the command hang. Measured 2026-09-24 on
+// python/forth: the model wrote a loop that never advanced, verify hit its deadline,
+// the run stopped as harness_broken after 2 attempts, and the caller spent 40 steps
+// finding the missing `i += 1` that a retry told "it hangs" would have looked for.
+fn mid_run_harness_failure(v: observe.CommandResult, baseline: observe.CommandResult?) -> String = {
+  let baseline_hung = match baseline { some(b) => b.timed_out, none => false }
+  if v.timed_out and not baseline_hung then "" else observe.harness_failure(v)
+}
+
+// Measured 2026-09-23: `solve --json` in a directory with no repository wrote calc.py and
+// reported `"changed": []`.
+test "outside a repository, what the attempts wrote is what changed" {
+  let root = fs.create_temp_dir("golemide-changed")!
+  let wrote = Attempt { n: 1, read: ["a.py"], edits: [editing.Edit { path: "a.py", source: "x = 1\n" }, editing.Edit { path: "b.py", source: "y = 1\n" }], rejected: [],
+    apply_error: "", verify: none, ok: false, cost_usd: 0.0, ms: 0, explanation: "" }
+  let again = Attempt { n: 2, read: ["a.py"], edits: [editing.Edit { path: "a.py", source: "x = 2\n" }], rejected: [],
+    apply_error: "", verify: none, ok: true, cost_usd: 0.0, ms: 0, explanation: "" }
+  assert_eq(changed_by_run(root, [], [wrote, again], false)!, ["a.py", "b.py"])
+  assert_eq(changed_by_run(root, [], [wrote, again], true)!, [])
+  fs.remove_all(root)!
+}
+
+test "a timeout after an edit is the edit's fault unless the untouched code timed out too" {
+  let hung = observe.CommandResult { command: "pytest", code: -1, stdout: "", stderr: "", timed_out: true, duration_ms: 120000, spawn_error: "" }
+  let failed = observe.CommandResult { command: "pytest", code: 1, stdout: "FAILED test_a", stderr: "", timed_out: false, duration_ms: 400, spawn_error: "" }
+  assert_eq(mid_run_harness_failure(hung, some(failed)), "")
+  assert_eq(mid_run_harness_failure(hung, some(hung)), "the command timed out")
+  assert(string.contains(prompts.hang_note(120000), "within 120s"))
+}

@@ -1,0 +1,102 @@
+// The files the model reads, as the prompt shows them: whole where they fit, with an
+// outline when they are long, and headed with the size a replacement has to match.
+
+import fs
+import self.observe
+import self.notes
+
+effect fn on_path(bin: String) -> Bool = (observe.run("command -v " + bin, ".", 5000)!).code == 0
+
+// The files' contents for the prompt; a long file gets its outline first.
+effect fn render_files(root: String, paths: List[String], quiet: Bool) -> (String, List[String]) = {
+  var chunks: List[String] = []
+  var read: List[String] = []
+  let hew = on_path("hew")!
+  for p in paths {
+    let r = read_whole(root, p, quiet)!
+    if r.error != "" then notes.note(quiet, "rejected " + p + ": " + r.error)!
+    else {
+      if not r.truncated then list.push(read, p) else notes.note(quiet, "read-only context: " + p + " exceeds the complete-file read budget")!
+      list.push(chunks, outline_of(root, p, r, hew)! + "--- " + p + size_of(r) + " ---\n" + r.content)
+    }
+  }
+  (string.join(chunks, "\n\n"), read)
+}
+
+// The file at the usual budget, or at the wide one when that makes it complete.
+effect fn read_whole(root: String, p: String, quiet: Bool) -> observe.Read = {
+  let r = observe.read_for_model(root, p, 24000)!
+  if not r.truncated or r.error != "" then r
+  else {
+    // Expanding is worth it only if it makes the file COMPLETE. A complete file is
+    // editable, and that is the whole point of the wider budget; a file still
+    // truncated at 96,000 is read-only either way, so the wide read buys nothing and
+    // costs 72,000 characters of every attempt's prompt.
+    //
+    // Measured on Aider's polyglot benchmark: all 26 C++ exercises vendor Catch2 as
+    // test/catch.hpp, 656,886 bytes. It was selected as a project source, re-read at
+    // the expanded budget, and sent as 96,000 characters of read-only context on every
+    // attempt -- against a gigasecond.cpp of 76 bytes. The outline `outline_of` adds is the part
+    // of an oversized file that is actually worth having.
+    let wide = observe.read_for_model(root, p, 96000)!
+    if not wide.truncated then {
+      notes.note(quiet, "expanded read of " + p + " (up to 96000 characters)")!
+      wide
+    } else {
+      notes.note(quiet, "far past the read budget: " + p + " stays a 24000-character excerpt (expanding to 96000 would still truncate)")!
+      r
+    }
+  }
+}
+
+effect fn outline_of(root: String, p: String, r: observe.Read, hew: Bool) -> String =
+  if not hew or not (r.truncated or list.len(string.split(r.content, "\n")) > 300) then ""
+  else {
+    let o = observe.run("hew outline " + observe.shell_quote(p), root, 20000)!
+    if o.code == 0 and string.trim(o.stdout) != "" then "--- " + p + ": outline (hew) ---\n" + string.trim_end(o.stdout) + "\n\n" else ""
+  }
+
+// The size goes in the header because 3 of 25 measured attempts were
+// spent re-asking for a whole file after the model emitted only the part
+// it changed. A number it can count against is cheaper than a rejection.
+fn size_of(r: observe.Read) -> String =
+  if r.truncated then " (TRUNCATED, READ-ONLY — incomplete source; do not emit a replacement)"
+  else " (" + int.to_string(list.len(string.split(r.content, "\n"))) + " lines, " + int.to_string(string.len(r.content)) + " bytes — a replacement must be all of it)"
+
+test "expanded reads retain the tail and partial files are not editable" {
+  let root = fs.create_temp_dir("golemide-read-contract")!
+  let medium = "// " + string.repeat("x", 30000) + "\nfn tail_marker() {}\n"
+  fs.write(root + "/medium.rs", medium)!
+  fs.write(root + "/large.rs", "// " + string.repeat("x", 97000) + "\nfn unseen_tail() {}\n")!
+  let (context, editable) = render_files(root, ["medium.rs", "large.rs"], true)!
+  assert(string.contains(context, "fn tail_marker() {}"))
+  assert(list.contains(editable, "medium.rs"))
+  assert(not list.contains(editable, "large.rs"))
+  assert(string.contains(context, "TRUNCATED, READ-ONLY"))
+
+  // A file the wider budget cannot complete is not expanded into it. `large.rs` is
+  // 97,000 characters, so expanding to 96,000 would still truncate and would buy
+  // nothing -- it is read-only at either size. It stays near the 24,000 excerpt
+  // instead of taking 96,000 characters of every attempt's prompt.
+  //
+  // The number that made this matter: all 26 C++ exercises in Aider's polyglot
+  // benchmark vendor Catch2 at 656,886 bytes, next to a 76-byte implementation file.
+  assert(not string.contains(context, "fn unseen_tail() {}"))
+  assert(string.len(context) < 60000)
+
+  // `medium.rs` is 30,000 characters: the wider budget does complete it, so it is still
+  // expanded and still editable, with its tail intact. That is asserted above.
+  let outside = observe.read_for_model(root, "../outside.rs", 10)!
+  assert_eq(outside.error, "outside the project root")
+  fs.remove_all(root)!
+}
+
+// The header carries the size because the model has to reproduce it exactly.
+test "an editable file is headed with the size a replacement has to match" {
+  let root = fs.create_temp_dir("golemide-header")!
+  fs.write(root + "/small.rs", "fn a() {}\nfn b() {}\n")!
+  let (context, editable) = render_files(root, ["small.rs"], true)!
+  assert(string.contains(context, "3 lines, 20 bytes"))
+  assert(string.contains(context, "a replacement must be all of it"))
+  assert(list.contains(editable, "small.rs"))
+}

@@ -18,7 +18,7 @@ fn codes_in(output: String, pattern: String) -> List[String] = {
   var out: List[String] = []
   for m in regex.find_all(pattern, output) {
     match regex.captures(pattern, m) {
-      some(cs) => { let code = list.get(cs, 1) ?? ""; if code != "" and not list.contains(out, code) then list.push(out, code) else () },
+      some(cs) => { let code = list.get(cs, 1) ?? ""; if code != "" and not list.contains(out, code) then list.push(out, code) },
       none => (),
     }
   }
@@ -34,7 +34,7 @@ effect fn explain(output: String, ex: Explainer, cwd: String) -> List[Explanatio
   for code in list.take(codes_in(output, ex.pattern), 3) {
     let r = observe.run(string.replace(ex.command, "{}", code), cwd, 15000)!
     let text = string.trim(r.stdout)
-    if r.code == 0 and text != "" and not string.contains(string.to_lower(text), "unknown error code") then list.push(out, Explanation { code: code, text: text }) else ()
+    if r.code == 0 and text != "" and not string.contains(string.to_lower(text), "unknown error code") then list.push(out, Explanation { code: code, text: text })
   }
   out
 }
@@ -60,7 +60,7 @@ fn failure_excerpt(output: String, tail_lines: Int) -> String = {
     let lines = string.split(text, "\n")
     var starts: List[Int] = []
     var i = 0
-    for l in lines { if starts_diagnostic(l) then list.push(starts, i) else (); i = i + 1 }
+    for l in lines { if starts_diagnostic(l) then list.push(starts, i); i = i + 1 }
     if list.len(starts) < 2 then observe.tail(text, tail_lines)
     else {
       let first = list.get(starts, 0) ?? 0

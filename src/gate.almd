@@ -17,6 +17,7 @@ import fs
 import env
 import process
 import self.observe
+import self.ecosystem
 
 type Checker = { label: String, program: String, args: List[String] }   // `{}` is the file path; label "" = none
 
@@ -72,7 +73,7 @@ effect fn configured(ext: String) -> Checker? = {
     let parts = list.filter(string.split(raw, " "), (p) => p != "")
     let program = list.first(parts) ?? raw
     var args = list.drop(parts, 1)
-    if not list.contains(args, "{}") then list.push(args, "{}") else ()
+    if not list.contains(args, "{}") then list.push(args, "{}")
     some(Checker { label: program, program: program, args: args })
   }
 }
@@ -97,7 +98,7 @@ effect fn gramide_supports(path: String, ext: String) -> Bool = {
 
 // Which check this path gets, in tier order; none is said, not assumed.
 effect fn checker_for(path: String) -> Checker = {
-  let ext = observe.extension_of(path)
+  let ext = ecosystem.extension_of(path)
   if ext == "" then NONE
   else match configured(ext)! {
     some(c) => c,
@@ -145,7 +146,7 @@ effect fn write_checked(path: String, source: String, create: Bool) -> Result[Wr
   else write_gated(path, source)
 
 effect fn explain_refusal(path: String, tmp: String, why: String) -> String = {
-  let ext = observe.extension_of(path)
+  let ext = ecosystem.extension_of(path)
   match list.find(SECOND_OPINION, (s) => s.0 == ext) {
     none => why,
     some((_, bin, cmd)) =>
@@ -162,7 +163,7 @@ effect fn write_gated(path: String, source: String) -> Result[Written, String] =
   let c = checker_for(path)!
   let dir = match string.last_index_of(path, "/") { some(i) => string.take(path, i), none => "." }
   let name = list.last(string.split(path, "/")) ?? path
-  let ext = observe.extension_of(path)
+  let ext = ecosystem.extension_of(path)
   let tmp = dir + "/." + name + ".golemide.tmp" + (if ext == "" then "" else "." + ext)
   fs.write(tmp, source) |> result.map_err((e) => "edit.write: " + e)!
   let v = run_checker(c, tmp)!
@@ -204,8 +205,8 @@ test "the tiers do not overlap, and gramide is the first of them" {
 }
 
 test "configured checker parsing adds the placeholder" {
-  assert_eq(observe.extension_of("a/b.Py"), "py")
-  assert_eq(observe.extension_of("Makefile"), "")
+  assert_eq(ecosystem.extension_of("a/b.Py"), "py")
+  assert_eq(ecosystem.extension_of("Makefile"), "")
 }
 
 test "package capabilities discover new write gates without language branches" {
