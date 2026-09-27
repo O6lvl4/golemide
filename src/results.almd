@@ -7,8 +7,11 @@ import self.observe
 import self.editing
 import self.prompts
 
+// `model` is the one the attempt was asked of: --model, or --strong-model once the ladder
+// has climbed. A caller reporting the run would otherwise credit its own model with the
+// work (O6lvl4/golemide#8).
 type Attempt = { n: Int, read: List[String], edits: List[editing.Edit], rejected: List[editing.Rejected], apply_error: String,
-  verify: observe.CommandResult?, ok: Bool, cost_usd: Float, ms: Int, explanation: String }
+  verify: observe.CommandResult?, ok: Bool, cost_usd: Float, ms: Int, explanation: String, model: String = "" }
 
 // `polish_kept` is none when no polish ran, and otherwise says whether the
 // simpler version survived its verify. Without it a rolled-back polish

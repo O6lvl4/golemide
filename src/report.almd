@@ -74,6 +74,7 @@ fn attempt_value(t: results.Attempt) -> Value = {
     ("cost_usd", usd_value(t.cost_usd)),
     ("ms", value.int(t.ms)),
   ]
+  if t.model != "" then list.push(fields, ("model", value.str(t.model)))
   if t.explanation != "" then list.push(fields, ("explanation", value.str(t.explanation)))
   if t.apply_error != "" then list.push(fields, ("apply_error", value.str(t.apply_error)))
   match t.verify { some(v) => list.push(fields, ("verify", verify_value(v, false))), none => () }

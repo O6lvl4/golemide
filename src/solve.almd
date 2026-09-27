@@ -25,7 +25,11 @@ import self.results
 // passed its first run and timed out on every attempt after it.
 // `strong_model` is where the ladder's last rung goes. A benchmark that compares agents
 // on one model sets it to that model, so more attempts cannot also mean a bigger model.
-type Options = { max_attempts: Int, max_files: Int, model: String, allow_create: Bool, quiet: Bool, polish: Int, polish_only: Bool, explore: Int, verify_timeout_ms: Int, strong_model: String }
+// `deadline_ms` bounds the whole run, 0 for none. A caller that gives up on a run it
+// cannot see into gets nothing back; one that says when it will give up gets the run
+// stopped before that, with what was done and why it stopped (O6lvl4/golemide#8).
+type Options = { max_attempts: Int, max_files: Int, model: String, allow_create: Bool, quiet: Bool, polish: Int, polish_only: Bool, explore: Int, verify_timeout_ms: Int, strong_model: String,
+  deadline_ms: Int = 0 }
 
 // Where a run stands between attempts. `unusable` counts attempts that produced no
 // edit worth running and drives the ladder; `stuck` counts the same failure twice in a
@@ -66,9 +70,33 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
       unusable: 0, last_ms: 0, stuck: 0, last_key: "", n: 1, finished: false, polishing: opts.polish_only,
       polish_left: if opts.polish_only then 0 else opts.polish, succeeded: opts.polish_only, polish_kept: none,
       snapshot: if opts.polish_only then saving.snapshot_of(obs.root, paths)! else [], originals: [] }
-    while not r.finished and (r.n <= opts.max_attempts or r.polishing) { r = attempt(g, r)! }
+    while not r.finished and (r.n <= opts.max_attempts or r.polishing) and not out_of_time(opts, env.millis() - started, r.last_ms) { r = attempt(g, r)! }
+    if not r.finished and r.n <= opts.max_attempts and out_of_time(opts, env.millis() - started, r.last_ms) then {
+      let note = deadline_note(list.len(r.attempts), env.millis() - started, opts.deadline_ms)
+      notes.note(quiet, note)!
+      r = { ...r, warnings: r.warnings + [note] }
+    }
     outcome_of(g, r, dirty_before, started)
   }
+}
+
+// Whether another attempt would run past --deadline, judged by how long the last one
+// took: the run stops with time left to report, rather than being killed mid-attempt.
+fn out_of_time(opts: Options, elapsed_ms: Int, last_ms: Int) -> Bool =
+  opts.deadline_ms > 0 and elapsed_ms + last_ms > opts.deadline_ms
+
+fn deadline_note(attempts: Int, elapsed_ms: Int, deadline_ms: Int) -> String =
+  "deadline: stopped after " + int.to_string(attempts) + " attempt(s), " + int.to_string(elapsed_ms / 1000) + "s of "
+    + int.to_string(deadline_ms / 1000) + "s used; the next would not have fit"
+
+test "a deadline stops the run before an attempt that would not fit" {
+  let opts = Options { max_attempts: 6, max_files: 10, model: "m", allow_create: false, quiet: true, polish: 0, polish_only: false, explore: 0,
+    verify_timeout_ms: 1000, strong_model: "s", deadline_ms: 300000 }
+  assert(not out_of_time(opts, 0, 0))
+  assert(not out_of_time(opts, 200000, 90000))
+  assert(out_of_time(opts, 250000, 90000))
+  assert(not out_of_time({ ...opts, deadline_ms: 0 }, 9999999, 90000))
+  assert_eq(deadline_note(3, 250000, 300000), "deadline: stopped after 3 attempt(s), 250s of 300s used; the next would not have fit")
 }
 
 effect fn already_passing(obs: observe.Observation, started: Int) -> Result[results.Outcome, String] = {
@@ -131,7 +159,7 @@ effect fn attempt(g: Given, r: Run) -> Result[Run, String] = {
   let (verify, passed, broken) = checked(g, a, r.n, started_at, throttled_before, throttled_ms_before)!
   let unverified_now = a.apply_error == "" and g.obs.verify_command == ""
   let ms = env.millis() - started_at
-  let tried = results.Attempt { n: r.n, read: read, edits: a.edits, rejected: a.rejected, apply_error: a.apply_error, verify: verify, cost_usd: a.cost, ms: ms, explanation: a.explanation, ok: passed }
+  let tried = results.Attempt { n: r.n, read: read, edits: a.edits, rejected: a.rejected, apply_error: a.apply_error, verify: verify, cost_usd: a.cost, ms: ms, explanation: a.explanation, ok: passed, model: model }
   // No verify command: the edits are written and that is the end of it. This used to
   // fall through to the next attempt, where the history said "result: FAILED" with no
   // reason, and the model rewrote a change nobody had found anything wrong with -- up

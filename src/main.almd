@@ -20,13 +20,14 @@ import self.tool
 
 // Kept equal to almide.toml's version. comide reads it to tell whether this
 // golemide has the tool interface (edit, --json) it calls.
-let VERSION = "0.2.0"
+let VERSION = "0.4.0"
 
 let USAGE = """
 golemide — observe, then act
 
   golemide solve <task>  [--root DIR] [--verify CMD] [--attempts N] [--files N]
-                        [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC] [--json]
+                        [--model M] [--create] [--quiet] [--files-seen N] [--timeout SEC]
+                        [--deadline SEC] [--json]
   golemide polish [focus]  [--root DIR] [--verify CMD] [--files N] [--model M] [--json]
   golemide edit          [--root DIR] [--create]
                         stdin: {"path": P, "replacements": [{"old": O, "new": N}]} or {"path": P, "source": S}
@@ -53,7 +54,9 @@ Options
                   commands, they run, their output joins the prompt (default 0 = off).
                   For tasks that ship no tests, where there is no failing command to read.
   --timeout SEC   how long the verify command may take (default 120)
-  --json          print one JSON object on stdout instead of the report; progress stays on stderr
+  --deadline SEC  how long the whole run may take: no attempt starts that would not fit,
+                  and the report says the run stopped for it (default: none)
+  --json         print one JSON object on stdout instead of the report; progress stays on stderr
 
 Exit status
   solve, polish   0 solved, 1 not solved, 2 setup error, 3 nothing to do or the verify
@@ -61,7 +64,7 @@ Exit status
   edit            0 written, 1 refused (the reason is in the JSON), 2 the input was not an edit
 """
 
-let VALUED = ["root", "verify", "attempts", "files", "model", "strong-model", "files-seen", "timeout", "task", "polish", "explore"]
+let VALUED = ["root", "verify", "attempts", "files", "model", "strong-model", "files-seen", "timeout", "task", "polish", "explore", "deadline"]
 
 type Args = { cmd: String, rest: List[String], flags: Map[String, String] }
 
@@ -173,7 +176,8 @@ effect fn solve_with(a: Args, task: String, root: String, quiet: Bool, polish_on
         // property that makes golemide trustworthy (a success is a command exiting zero)
         // should not be traded away unless asked for.
         explore: int.parse(map.get(a.flags, "explore") ?? "0") ?? 0, verify_timeout_ms: verify_timeout_ms,
-        strong_model: map.get(a.flags, "strong-model") ?? ask.MODEL_STRONG }
+        strong_model: map.get(a.flags, "strong-model") ?? ask.MODEL_STRONG,
+        deadline_ms: (int.parse(map.get(a.flags, "deadline") ?? "0") ?? 0) * 1000 }
       let r = solve.solve(creds, task, obs, opts)!
       say(json_mode, report.human(r, polish_only), report.outcome_json(r, obs.verify_command), false)!
       ok(report.exit_code(r))
