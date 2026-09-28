@@ -7,9 +7,12 @@
 <p align="center">Almide 製のコーディングエージェント。<br>プロジェクトを読み、編集し、テストで確かめる。</p>
 <p align="center">
   <a href="https://github.com/O6lvl4/golemide/actions/workflows/quality.yml"><img src="https://github.com/O6lvl4/golemide/actions/workflows/quality.yml/badge.svg" alt="品質検証 CI"></a>
-  · <a href="README.md">English</a>
   · <a href="#使い始める">使い始める</a>
   · <a href="docs/quality-plan.md">品質改善の計画</a>
+</p>
+<p align="center">
+  <a href="README.md"><img alt="English" src="https://img.shields.io/badge/English-d0d7de?style=flat-square"></a>
+  <a href="README.ja.md"><img alt="日本語" src="https://img.shields.io/badge/%E6%97%A5%E6%9C%AC%E8%AA%9E-24292f?style=flat-square"></a>
 </p>
 
 golemide は、リポジトリにある事実を手がかりに動きます。ソースファイル、プロジェクトの設定、
