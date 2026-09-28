@@ -5,9 +5,12 @@
 <p align="center">Read the project. Make the edit. Run the tests.</p>
 <p align="center">
   <a href="https://github.com/O6lvl4/golemide/actions/workflows/quality.yml"><img src="https://github.com/O6lvl4/golemide/actions/workflows/quality.yml/badge.svg" alt="Quality CI"></a>
-  · <a href="README_ja.md">日本語</a>
   · <a href="#quick-start">Quick start</a>
   · <a href="docs/quality-plan.md">Quality plan</a>
+</p>
+<p align="center">
+  <a href="README.md"><img alt="English" src="https://img.shields.io/badge/English-24292f?style=flat-square"></a>
+  <a href="README.ja.md"><img alt="日本語" src="https://img.shields.io/badge/%E6%97%A5%E6%9C%AC%E8%AA%9E-d0d7de?style=flat-square"></a>
 </p>
 
 golemide works from the evidence in your repository: source files, project markers,
