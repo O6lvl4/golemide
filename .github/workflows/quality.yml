@@ -50,8 +50,9 @@ jobs:
           ref: d96ea3d18f0a6e42973da27c7ffca97644f8d9ab
           path: .ci/hew
           persist-credentials: false
-      # gramide on v0.64.0: develop resolves gramide's builtin Map to its module named
-      # map and stops at E029 (almide/almide#2839). Back to the pin above once fixed.
+      # gramide and hew (built on gramide) on v0.64.0: develop resolves gramide's builtin Map
+      # to its module named map and stops at E029 (almide/almide#2839). Back to the pin
+      # above once fixed.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: almide/almide
@@ -73,7 +74,7 @@ jobs:
       - name: Build pinned hew
         working-directory: .ci/hew
         env:
-          ALMIDE_BIN: ${{ github.workspace }}/.ci/almide/target/release/almide
+          ALMIDE_BIN: ${{ github.workspace }}/.ci/almide064/target/release/almide
         run: '"$ALMIDE_BIN" build'
       - name: Real companion integration
         env:
