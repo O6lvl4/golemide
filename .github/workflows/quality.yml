@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: almide/almide
-          ref: 51b9d8e6d7594239f990c94283a57ae7e8549392
+          ref: 7b563f7ee30b7715fd1cf8b0631eee0f22c8c598
           path: .ci/almide
           persist-credentials: false
       - run: rustup toolchain install 1.94.0 --profile minimal
@@ -31,7 +31,7 @@ jobs:
         id: compiler
         with:
           path: .ci/almide/target/release/almide
-          key: almide-${{ runner.os }}-51b9d8e6d7594239f990c94283a57ae7e8549392-rust1.94.0
+          key: almide-${{ runner.os }}-7b563f7ee30b7715fd1cf8b0631eee0f22c8c598-rust1.94.0
       - if: steps.compiler.outputs.cache-hit != 'true'
         run: cargo build --release --locked --bin almide --manifest-path .ci/almide/Cargo.toml
       - name: Tests, build and CLI smoke
@@ -50,31 +50,15 @@ jobs:
           ref: d96ea3d18f0a6e42973da27c7ffca97644f8d9ab
           path: .ci/hew
           persist-credentials: false
-      # gramide and hew (built on gramide) on v0.64.0: develop resolves gramide's builtin Map
-      # to its module named map and stops at E029 (almide/almide#2839). Back to the pin
-      # above once fixed.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: almide/almide
-          ref: a9650baf6ff6230de9e165b2e4484ab10ebbae57
-          path: .ci/almide064
-          persist-credentials: false
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        id: compiler064
-        with:
-          path: .ci/almide064/target/release/almide
-          key: almide-${{ runner.os }}-a9650baf6ff6230de9e165b2e4484ab10ebbae57-rust1.94.0
-      - if: steps.compiler064.outputs.cache-hit != 'true'
-        run: cargo build --release --locked --bin almide --manifest-path .ci/almide064/Cargo.toml
       - name: Build pinned gramide
         working-directory: .ci/gramide
         env:
-          ALMIDE_BIN: ${{ github.workspace }}/.ci/almide064/target/release/almide
+          ALMIDE_BIN: ${{ github.workspace }}/.ci/almide/target/release/almide
         run: '"$ALMIDE_BIN" build -o gramide'
       - name: Build pinned hew
         working-directory: .ci/hew
         env:
-          ALMIDE_BIN: ${{ github.workspace }}/.ci/almide064/target/release/almide
+          ALMIDE_BIN: ${{ github.workspace }}/.ci/almide/target/release/almide
         run: '"$ALMIDE_BIN" build'
       - name: Real companion integration
         env:
