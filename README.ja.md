@@ -1,10 +1,8 @@
 <p align="center">
-  <img src="docs/images/golemide.png" alt="黒い岩の隙間から金色の光が輝く、石の守り手 Golemide" width="400">
+  <img src="docs/images/banner.png" alt="golemide — まず観察する。確かめながら作る。Almide 製のコーディングエージェント。">
 </p>
 
-<h1 align="center">golemide</h1>
-<p align="center"><strong>まず観察する。確かめながら作る。</strong></p>
-<p align="center">Almide 製のコーディングエージェント。<br>プロジェクトを読み、編集し、テストで確かめる。</p>
+<p align="center">プロジェクトを読み、編集し、テストで確かめる。</p>
 <p align="center">
   <a href="https://github.com/O6lvl4/golemide/actions/workflows/quality.yml"><img src="https://github.com/O6lvl4/golemide/actions/workflows/quality.yml/badge.svg" alt="品質検証 CI"></a>
   · <a href="#使い始める">使い始める</a>
