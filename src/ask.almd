@@ -17,10 +17,10 @@ type Options = { system: String, model: String, max_output_tokens: Int, reasonin
 
 // (Almide's regex has no case-insensitive flag, no word boundary and no backreference: subjects are lower-cased and
 // patterns written in lower case; word edges are spelled out where needed.)
-fn is_transient(m: String) -> Bool = regex.is_match("status (408|409|425|429|500|502|503|504)([^0-9]|$)|request timeout|timed? out|econnreset|etimedout|eai_again|socket hang up", string.to_lower(m))
-fn is_server_timeout(m: String) -> Bool = regex.is_match("status 408([^0-9]|$)|request timeout", string.to_lower(m))
-fn is_budget_truncation(m: String) -> Bool = regex.is_match("truncated before any content|raise max_completion_tokens", string.to_lower(m))
-fn is_rate_limit(m: String) -> Bool = regex.is_match("status 429([^0-9]|$)|rate limit|too many requests", string.to_lower(m))
+fn is_transient(m: String) -> Bool = regex.is_match(regex.new("status (408|409|425|429|500|502|503|504)([^0-9]|$)|request timeout|timed? out|econnreset|etimedout|eai_again|socket hang up"), string.to_lower(m))
+fn is_server_timeout(m: String) -> Bool = regex.is_match(regex.new("status 408([^0-9]|$)|request timeout"), string.to_lower(m))
+fn is_budget_truncation(m: String) -> Bool = regex.is_match(regex.new("truncated before any content|raise max_completion_tokens"), string.to_lower(m))
+fn is_rate_limit(m: String) -> Bool = regex.is_match(regex.new("status 429([^0-9]|$)|rate limit|too many requests"), string.to_lower(m))
 // A truncation in which the reasoning stream, not the answer, consumed the budget. It
 // wants the OPPOSITE retry from an answer cut off mid-sentence: less thinking, not more
 // room. Measured on glm-5.3 (Workers AI, 2026-09-13) with one prompt at 4096 output
@@ -28,7 +28,7 @@ fn is_rate_limit(m: String) -> Bool = regex.is_match("status 429([^0-9]|$)|rate 
 // `high` returned zero characters of answer after 12346 of reasoning and finish=length.
 // Reasoning expands to fill what it is given, so tripling the budget on its own buys the
 // reasoning three times the room and the answer still never starts.
-fn is_reasoning_truncation(m: String) -> Bool = regex.is_match("consumed by reasoning", string.to_lower(m))
+fn is_reasoning_truncation(m: String) -> Bool = regex.is_match(regex.new("consumed by reasoning"), string.to_lower(m))
 
 let EFFORTS = ["low", "medium", "high"]
 
@@ -41,13 +41,13 @@ fn lower_effort(e: String) -> String = {
 // Whether a JSON answer was cut off rather than finished: finished JSON
 // ends in `}` or `]`; anything else is a generation the budget stopped.
 fn looks_truncated(text: String) -> Bool = {
-  let t = string.trim(regex.replace("```\\s*$", string.trim(text), ""))
+  let t = string.trim(regex.replace(regex.new("```\\s*$"), string.trim(text), ""))
   if not (string.starts_with(t, "{") or string.starts_with(t, "[")) then false
   // (not a parse attempt: Almide's json.parse accepts an unterminated document)
   else not (string.ends_with(t, "}") or string.ends_with(t, "]"))
 }
 
-fn strip_fence(s: String) -> String = match regex.captures("```(?:json|jsonc)?\\s*\\n([\\s\\S]*?)```", s) {
+fn strip_fence(s: String) -> String = match regex.captures(regex.new("```(?:json|jsonc)?\\s*\\n([\\s\\S]*?)```"), s) {
   some(cs) => string.trim(list.get(cs, 1) ?? ""),
   none => "",
 }
@@ -70,7 +70,7 @@ fn slice_braces(s: String) -> String = {
 
 // `,` followed only by whitespace and a closing bracket is dropped
 fn drop_trailing_commas(s: String) -> String = {
-  let cs = string.chars(s)
+  let cs = string.to_list(s)
   var out: List[String] = []
   var i = 0
   while i < list.len(cs) {
@@ -83,7 +83,7 @@ fn drop_trailing_commas(s: String) -> String = {
     } else list.push(out, c)
     i = i + 1
   }
-  string.join(out, "")
+  list.join(out, "")
 }
 
 // Parse JSON from a model, tolerating what models actually emit: a fence,
@@ -175,7 +175,7 @@ effect fn retried(a: Asking, t: Tally, m: String) -> Result[Asked, String] = {
   let (next, wait) = paced(t, m)
   if wait < 0 then err(if m == "" then "no answer" else m)
   else {
-    let ms = if is_rate_limit(m) then wait + env.millis() % 1000 else wait
+    let ms = if is_rate_limit(m) then wait + datetime.now_ms() % 1000 else wait
     if is_rate_limit(m) then count_throttle(ms)!
     debug("retry", m + "\nretrying in " + int.to_string(ms) + "ms")!
     env.sleep_ms(ms)

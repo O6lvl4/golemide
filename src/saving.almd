@@ -22,7 +22,7 @@ effect fn snapshot_of(root: String, paths: List[String]) -> List[(String, String
 effect fn restore(root: String, snapshot: List[(String, String)]) -> Unit = {
   for entry in snapshot {
     let (p, text) = entry
-    let _ = fs.write(root + "/" + p, text)
+    let _ = fs.write_text(root + "/" + p, text)
     ()
   }
 }
@@ -38,15 +38,15 @@ effect fn restore(root: String, snapshot: List[(String, String)]) -> Unit = {
 effect fn bump_mtimes(root: String, before: List[(String, Int)]) -> Unit = {
   var same: List[String] = []
   for (p, was) in before {
-    if was >= 0 and (fs.modified_at(root + "/" + p) ?? -1) == was then list.push(same, p)
+    if was >= 0 and ((fs.stat(root + "/" + p) |> result.map((s) => s.modified)) ?? -1) == was then list.push(same, p)
   }
   if list.is_empty(same) then () else {
-    env.sleep_ms(1100 - (env.millis() % 1000))
+    env.sleep_ms(1100 - (datetime.now_ms() % 1000))
     for p in same { let _ = observe.run("touch " + observe.shell_quote(p), root, 5000)!; () }
   }
 }
 
-effect fn mtime_of(path: String) -> Int = fs.modified_at(path) ?? -1
+effect fn mtime_of(path: String) -> Int = (fs.stat(path) |> result.map((s) => s.modified)) ?? -1
 
 // Each file as it was before this run first wrote it; "" for one that did not exist.
 effect fn remember_originals(root: String, originals: List[(String, String)], paths: List[String]) -> List[(String, String)] = {
@@ -61,23 +61,23 @@ effect fn remember_originals(root: String, originals: List[(String, String)], pa
 // the verify command must leave the passing files exactly as they were.
 test "a snapshot restores the files it captured, and ignores the ones it could not read" {
   let root = fs.create_temp_dir("golemide-polish")!
-  fs.write(root + "/kept.almd", "fn passing() -> Int = 1\n")!
+  fs.write_text(root + "/kept.almd", "fn passing() -> Int = 1\n")!
   let snap = snapshot_of(root, ["kept.almd", "never-existed.almd"])!
   assert_eq(list.len(snap), 1)
-  fs.write(root + "/kept.almd", "fn broken() -> Int = \n")!
+  fs.write_text(root + "/kept.almd", "fn broken() -> Int = \n")!
   restore(root, snap)!
   assert_eq(fs.read_text(root + "/kept.almd") ?? "", "fn passing() -> Int = 1\n")
 }
 
 test "the run diff runs from before the first write to the end, over every attempt" {
   let root = fs.create_temp_dir("golemide-rundiff")!
-  fs.write(root + "/a.py", "x = 1\ny = 1\n")!
+  fs.write_text(root + "/a.py", "x = 1\ny = 1\n")!
   var originals = remember_originals(root, [], ["a.py", "new.py"])!
-  fs.write(root + "/a.py", "x = 2\ny = 1\n")!
+  fs.write_text(root + "/a.py", "x = 2\ny = 1\n")!
   // A second attempt writes a.py again: the original stays the one from before the first.
   originals = remember_originals(root, originals, ["a.py"])!
-  fs.write(root + "/a.py", "x = 2\ny = 2\n")!
-  fs.write(root + "/new.py", "z = 3\n")!
+  fs.write_text(root + "/a.py", "x = 2\ny = 2\n")!
+  fs.write_text(root + "/new.py", "z = 3\n")!
   let d = diffing.run_diff(root, originals)!
   assert(string.contains(d, "--- a.py ---"))
   assert(string.contains(d, "- x = 1"))
@@ -88,16 +88,16 @@ test "the run diff runs from before the first write to the end, over every attem
 
 test "a rewrite in the same second is pushed to a later one, and nothing else waits" {
   let root = fs.create_temp_dir("golemide-mtime")!
-  fs.write(root + "/a.py", "x = 1\n")!
+  fs.write_text(root + "/a.py", "x = 1\n")!
   let was = mtime_of(root + "/a.py")!
-  fs.write(root + "/a.py", "x = 2\n")!
+  fs.write_text(root + "/a.py", "x = 2\n")!
   bump_mtimes(root, [("a.py", was)])!
   // Whether or not the rewrite crossed a second on its own, it now reads as newer.
   assert(mtime_of(root + "/a.py")! > was)
   // A file that did not exist before has no stale compile to fear.
-  fs.write(root + "/b.py", "y = 1\n")!
-  let t0 = env.millis()
+  fs.write_text(root + "/b.py", "y = 1\n")!
+  let t0 = datetime.now_ms()
   bump_mtimes(root, [("b.py", -1)])!
-  assert(env.millis() - t0 < 500)
+  assert(datetime.now_ms() - t0 < 500)
   fs.remove_all(root)!
 }

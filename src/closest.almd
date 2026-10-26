@@ -40,20 +40,20 @@ fn anchor_starts(lines: List[String], quoted: List[String]) -> List[Int] = {
   var i = 0
   for l in lines {
     let t = string.trim(l)
-    if string.len(t) > 2 then map.insert(at, t, (map.get(at, t) ?? []) + [i])
+    if string.len(t) > 2 then { at = map.set(at, t, (map.get(at, t) ?? []) + [i]) }
     i = i + 1
   }
   var votes: Map[Int, Float] = [:]
   var j = 0
   for q in quoted {
     let hits = map.get(at, string.trim(q)) ?? []
-    let weight = 1.0 / int.to_float(int.max(1, list.len(hits)))
+    let weight = 1.0 / float.from(int.max(1, list.len(hits)))
     for hit in hits {
-      if hit >= j then map.insert(votes, hit - j, (map.get(votes, hit - j) ?? 0.0) + weight)
+      if hit >= j then { votes = map.set(votes, hit - j, (map.get(votes, hit - j) ?? 0.0) + weight) }
     }
     j = j + 1
   }
-  let enough = list.filter(map.entries(votes), (e) => e.1 * int.to_float(NEAREST_MAX_OCCURRENCES) >= 1.0)
+  let enough = list.filter(map.to_list(votes), (e) => e.1 * float.from(NEAREST_MAX_OCCURRENCES) >= 1.0)
   list.take(list.map(list.sort_by(enough, (e) => 0.0 - e.1), (e) => e.0), NEAREST_CANDIDATES)
 }
 
@@ -67,7 +67,7 @@ fn nearest_starts(lines: List[String], quoted: List[String]) -> List[Int] =
 fn window_score(lines: List[String], i: Int, want: List[String]) -> Float = {
   let pairs = list.zip(list.slice(lines, i, i + list.len(want)), want)
   let total = list.fold(pairs, 0.0, (acc, p) => acc + ladder.similarity(string.take(string.trim(p.0), 200), string.take(string.trim(p.1), 200)))
-  total / int.to_float(int.max(1, list.len(want)))
+  total / float.from(int.max(1, list.len(want)))
 }
 
 // The block of the quote's height whose lines are most like the quote's first lines,
@@ -86,10 +86,10 @@ fn nearest(text: String, old: String) -> String = {
   else {
     let block = list.slice(lines, best, int.min(list.len(lines), best + list.len(quoted)))
     var out = ["the closest text in the file (lines " + int.to_string(best + 1) + "-" + int.to_string(best + list.len(block))
-      + ", " + int.to_string(float.to_int(best_score * 100.0)) + "% alike) is:"]
+      + ", " + int.to_string(int.from_saturating(best_score * 100.0)) + "% alike) is:"]
     var n = best + 1
     for l in block { list.push(out, string.pad_start(int.to_string(n), 5, " ") + "│ " + l); n = n + 1 }
-    string.join(out, "\n")
+    list.join(out, "\n")
   }
 }
 

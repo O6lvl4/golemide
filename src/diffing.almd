@@ -80,8 +80,8 @@ fn unified_diff(before: String, after: String) -> String = {
     if p > DIFF_CONTEXT then list.push(out, "  …")
     for (t, line) in ops { list.push(out, t + " " + line) }
     if s > DIFF_CONTEXT then list.push(out, "  …")
-    if list.len(out) > DIFF_MAX_LINES then string.join(list.take(out, DIFF_MAX_LINES), "\n") + "\n  … " + int.to_string(list.len(out) - DIFF_MAX_LINES) + " more diff lines"
-    else string.join(out, "\n")
+    if list.len(out) > DIFF_MAX_LINES then list.join(list.take(out, DIFF_MAX_LINES), "\n") + "\n  … " + int.to_string(list.len(out) - DIFF_MAX_LINES) + " more diff lines"
+    else list.join(out, "\n")
   }
 }
 
@@ -94,7 +94,7 @@ effect fn run_diff(root: String, originals: List[(String, String)]) -> String = 
     let now = fs.read_text(root + "/" + p) ?? ""
     if now != was then list.push(parts, "--- " + p + " ---\n" + unified_diff(was, now))
   }
-  string.join(parts, "\n")
+  list.join(parts, "\n")
 }
 
 test "unified_diff shows the change with two lines of context" {
@@ -105,7 +105,7 @@ test "unified_diff shows the change with two lines of context" {
   assert(string.contains(d, "  d"))
   assert_eq(unified_diff("same\n", "same\n"), "(no change)")
   // a long unchanged head and tail cost nothing and are elided
-  let big_a = string.join(list.map(list.range(0, 800), (i) => "line " + int.to_string(i)), "\n")
+  let big_a = list.join(list.map(list.range(0, 800), (i) => "line " + int.to_string(i)), "\n")
   let big_b = string.replace(big_a, "line 400", "CHANGED")
   let d2 = unified_diff(big_a, big_b)
   assert(string.contains(d2, "- line 400"))

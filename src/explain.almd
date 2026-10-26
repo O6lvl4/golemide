@@ -16,8 +16,8 @@ fn explainer_for(language: String) -> Explainer? = list.find(EXPLAINERS, (e) => 
 // Diagnostic codes named in this output, in first-seen order.
 fn codes_in(output: String, pattern: String) -> List[String] = {
   var out: List[String] = []
-  for m in regex.find_all(pattern, output) {
-    match regex.captures(pattern, m) {
+  for m in regex.find_all(regex.new(pattern), output) {
+    match regex.captures(regex.new(pattern), m) {
       some(cs) => { let code = list.get(cs, 1) ?? ""; if code != "" and not list.contains(out, code) then list.push(out, code) },
       none => (),
     }
@@ -42,14 +42,14 @@ effect fn explain(output: String, ex: Explainer, cwd: String) -> List[Explanatio
 fn render_explanations(xs: List[Explanation]) -> String =
   if list.is_empty(xs) then ""
   else "=== WHAT THE TOOLCHAIN SAYS ABOUT THESE DIAGNOSTICS ===\nThis is the compiler's own documentation for the errors above. It is\nauthoritative — prefer it over what the same code would mean in\nanother language.\n\n"
-    + string.join(list.map(xs, (x) => "--- " + x.code + " ---\n" + (if string.len(x.text) > 2400 then string.take(x.text, 2400) + "\n… (truncated)" else x.text)), "\n\n")
+    + list.join(list.map(xs, (x) => "--- " + x.code + " ---\n" + (if string.len(x.text) > 2400 then string.take(x.text, 2400) + "\n… (truncated)" else x.text)), "\n\n")
 
 // Where one failure's report begins, per tool: compilers put error/warning
 // at column 0; jest `●`, go `--- FAIL:`, pytest `___ name ___`, cargo
 // `---- name stdout ----`, catch2 a dashed rule.
 fn starts_diagnostic(l: String) -> Bool =
-  regex.is_match("^(error|warning)([^a-zA-Z0-9_]|$)", l) or regex.is_match("^\\s{0,4}● ", l) or regex.is_match("^\\s*--- FAIL: ", l)
-  or regex.is_match("^_{3,} .+ _{3,}$", l) or regex.is_match("^---- .+ stdout ----$", l) or regex.is_match("^-{20,}$", l)
+  regex.is_match(regex.new("^(error|warning)([^a-zA-Z0-9_]|$)"), l) or regex.is_match(regex.new("^\\s{0,4}● "), l) or regex.is_match(regex.new("^\\s*--- FAIL: "), l)
+  or regex.is_match(regex.new("^_{3,} .+ _{3,}$"), l) or regex.is_match(regex.new("^---- .+ stdout ----$"), l) or regex.is_match(regex.new("^-{20,}$"), l)
 
 // The first few whole diagnostics when the output is a list of them (the
 // first is the cause, the rest cascade); otherwise the tail.
@@ -65,7 +65,7 @@ fn failure_excerpt(output: String, tail_lines: Int) -> String = {
     else {
       let first = list.get(starts, 0) ?? 0
       let end = list.get(starts, 5) ?? list.len(lines)
-      let head = string.join(list.take(list.drop(lines, first), end - first), "\n")
+      let head = list.join(list.take(list.drop(lines, first), end - first), "\n")
       let omitted = list.len(starts) - int.min(5, list.len(starts))
       if omitted > 0 then head + "\n\n… and " + int.to_string(omitted) + " more diagnostic(s). Fix these first — later errors are usually caused by the earlier ones."
       else head

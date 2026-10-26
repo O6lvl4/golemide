@@ -36,7 +36,7 @@ effect fn apply_request(root: String, input: String, allow_create: Bool) -> Edit
   match json.parse(input) {
     err(e) => refused(2, "", "the input is not JSON: " + e),
     ok(v) => match editing.edit_of(v) {
-      none => refused(2, json.get_string(v, "path") ?? "", "an edit is a `path` and either `source` or a non-empty `replacements` list"),
+      none => refused(2, value.get_string(v, "path") ?? "", "an edit is a `path` and either `source` or a non-empty `replacements` list"),
       some(e0) => apply_edit(root, e0, editing.replacements_of(v), allow_create)!,
     },
   }
@@ -73,13 +73,13 @@ effect fn apply_edit(root: String, e0: editing.Edit, reps: List[replace.Replacem
 }
 
 fn result_json(r: EditResult) -> String = {
-  var fields = [("ok", value.bool(r.code == 0)), ("path", value.str(r.path))]
+  var fields = [("ok", value.bool(r.code == 0)), ("path", value.string(r.path))]
   if r.code == 0 then {
     list.push(fields, ("bytes", value.int(r.bytes)))
-    list.push(fields, ("checked_by", value.str(r.checked_by)))
-    list.push(fields, ("matched", value.array(list.map(r.matched, (m) => value.str(m)))))
-    list.push(fields, ("diff", value.str(r.diff)))
-  } else list.push(fields, ("error", value.str(r.error)))
+    list.push(fields, ("checked_by", value.string(r.checked_by)))
+    list.push(fields, ("matched", value.array(list.map(r.matched, (m) => value.string(m)))))
+    list.push(fields, ("diff", value.string(r.diff)))
+  } else list.push(fields, ("error", value.string(r.error)))
   json.stringify(value.object(fields))
 }
 
@@ -101,11 +101,11 @@ test "a relative root is resolved against the working directory" {
 
 // The request as a JSON string, so the tests read like the calls a caller makes.
 fn edit_request(path: String, old: String, new: String) -> String =
-  json.stringify(value.object([("path", value.str(path)), ("replacements", value.array([value.object([("old", value.str(old)), ("new", value.str(new))])]))]))
+  json.stringify(value.object([("path", value.string(path)), ("replacements", value.array([value.object([("old", value.string(old)), ("new", value.string(new))])]))]))
 
 test "an edit lands through the same checks solve uses, and says why when it does not" {
   let root = fs.create_temp_dir("golemide-edit")!
-  fs.write(root + "/notes.txt", "fn a():\n    x = 1\n    y = 2\n")!
+  fs.write_text(root + "/notes.txt", "fn a():\n    x = 1\n    y = 2\n")!
 
   // A replacement whose indentation the caller lost is still found, and re-indented.
   let r = apply_request(root, edit_request("notes.txt", "x = 1\ny = 2", "x = 1\ny = 3"), false)!

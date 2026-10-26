@@ -59,7 +59,7 @@ effect fn widened(obs: observe.Observation, verify: observe.CommandResult?, path
       let fresh = list.filter(obs.files, (f) => string.contains(hay, f) and not list.contains(paths, f))
       if list.is_empty(fresh) then ok(paths)
       else {
-        notes.note(quiet, "failure names new files: " + string.join(fresh, ", "))!
+        notes.note(quiet, "failure names new files: " + list.join(fresh, ", "))!
         ok(list.take(paths + fresh, max_files + 2))
       }
     },
@@ -81,11 +81,11 @@ fn schema(s: String) -> Value = json.parse(s) ?? value.object([])
 // than its token count suggests — it invites the next attempt to repair a failure the
 // last attempt already moved.
 fn render_observation(obs: observe.Observation, task: String, baseline_excerpt: String, language_reference: String, show_baseline: Bool) -> String =
-  string.join(list.filter([
+  list.join(list.filter([
     "=== TASK ===\n" + task,
     project_section(obs),
     language_reference,
-    "=== FILES (" + int.to_string(list.len(obs.files)) + ") ===\n" + string.join(obs.files, "\n") + (if obs.files_omitted != "" then "\n" + obs.files_omitted else ""),
+    "=== FILES (" + int.to_string(list.len(obs.files)) + ") ===\n" + list.join(obs.files, "\n") + (if obs.files_omitted != "" then "\n" + obs.files_omitted else ""),
     if string.trim(obs.repo_map) != "" then "=== REPO MAP (ranked by how central each symbol is) ===\n" + obs.repo_map else "",
     if show_baseline then baseline_section(obs, baseline_excerpt) else "",
   ], (part) => part != ""), "\n\n")
@@ -108,7 +108,7 @@ fn baseline_section(obs: observe.Observation, excerpt: String) -> String = match
 
 // Drop the parts of a ctxgate summary that point at a vault we cannot read.
 fn strip_vault_header(s: String) -> String =
-  string.join(list.map(list.filter(string.split(s, "\n"), (l) => not (regex.is_match("^\\[ctxgate\\].*vaulted as ctx:", l) or regex.is_match("^\\s+full text: ctxgate show ", l) or regex.is_match("^\\s+source: ", l))), (l) => string.replace(l, " (see vault)", "")), "\n")
+  list.join(list.map(list.filter(string.split(s, "\n"), (l) => not (regex.is_match(regex.new("^\\[ctxgate\\].*vaulted as ctx:"), l) or regex.is_match(regex.new("^\\s+full text: ctxgate show "), l) or regex.is_match(regex.new("^\\s+source: "), l))), (l) => string.replace(l, " (see vault)", "")), "\n")
 
 // What the model is shown of a failing command's output: a ctxgate summary
 // when it is installed, the output is long, and the summary is actually a
@@ -120,7 +120,7 @@ effect fn failure_view(command: String, raw: String, root: String, tail_lines: I
   if string.len(text) > 2000 and reading.on_path("ctxgate")! then {
     match fs.create_temp_file("golemide-out") {
       ok(tmp) => {
-        let _ = fs.write(tmp, text)
+        let _ = fs.write_text(tmp, text)
         let r = observe.run("ctxgate summarize " + observe.shell_quote(if command == "" then "verify" else command) + " < " + observe.shell_quote(tmp), root, 20000)!
         let _ = fs.remove(tmp)
         if r.code == 0 then summary = string.trim_end(strip_vault_header(r.stdout))
@@ -139,7 +139,7 @@ effect fn failure_view(command: String, raw: String, root: String, tail_lines: I
 let SKIP_SOURCES = "(^|/)(package(-lock)?\\.json|Cargo\\.(toml|lock)|go\\.(mod|sum)|pyproject\\.toml|setup\\.(py|cfg)|CMakeLists\\.txt|build\\.gradle|gradlew(\\.bat)?|\\.gitignore|\\.npmrc|\\.eslintrc|babel\\.config\\.js|jest\\.config\\.js|tsconfig\\.json|requirements\\.txt|Makefile)$"
 
 fn small_project_sources(obs: observe.Observation) -> List[String] = {
-  let files = list.filter(obs.files, (f) => not regex.is_match(SKIP_SOURCES, f) and not string.contains(f, "/.") and not string.starts_with(f, "."))
+  let files = list.filter(obs.files, (f) => not regex.is_match(regex.new(SKIP_SOURCES), f) and not string.contains(f, "/.") and not string.starts_with(f, "."))
   if list.len(files) <= 8 then files else []
 }
 
@@ -176,14 +176,14 @@ effect fn explore_round(creds: llm.Credentials, context: String, root: String, m
   match ask.ask_json(creds, prompt, schema(EXPLORE_SCHEMA), ask.Options { system: SYSTEM, model: model, max_output_tokens: 2048, reasoning_effort: "low" }) {
     err(e) => { notes.note(quiet, "exploration failed: " + e)!; ok(("", 0.0)) },
     ok(a) => {
-      let asked = list.take(list.map(json.get_array(a.value, "commands") ?? [], (v) => value.as_string(v) ?? ""), EXPLORE_MAX_COMMANDS)
-      let why = json.get_string(a.value, "reason") ?? ""
+      let asked = list.take(list.map(value.get_array(a.value, "commands") ?? [], (v) => value.as_string(v) ?? ""), EXPLORE_MAX_COMMANDS)
+      let why = value.get_string(a.value, "reason") ?? ""
       if list.is_empty(asked) then ok(("", a.cost_usd))
       else {
         if why != "" then notes.note(quiet, "looking for: " + why)!
         var seen: List[String] = []
         for c in list.filter(asked, (c) => string.trim(c) != "") { list.push(seen, ran(c, root, quiet)!) }
-        ok(("\n\n=== WHAT I RAN ===\n" + string.join(seen, "\n\n"), a.cost_usd))
+        ok(("\n\n=== WHAT I RAN ===\n" + list.join(seen, "\n\n"), a.cost_usd))
       }
     },
   }
@@ -212,7 +212,7 @@ effect fn select_files(creds: llm.Credentials, context: String, obs: observe.Obs
     let (picked, cost) = match ask.ask_json(creds, prompt, schema(SELECT_SCHEMA), ask.Options { system: SYSTEM, model: model, max_output_tokens: 2048, reasoning_effort: "low" }) {
       ok(a) => {
         notes.note_hedges(quiet, a.hedged, a.hedge_wins)!
-        (list.map(json.get_array(a.value, "files") ?? [], (v) => value.as_string(v) ?? ""), a.cost_usd)
+        (list.map(value.get_array(a.value, "files") ?? [], (v) => value.as_string(v) ?? ""), a.cost_usd)
       },
       err(e) => {
         notes.note(quiet, "file selection failed: " + e)!

@@ -40,7 +40,7 @@ fn found_on(text: String, old: String, steps: List[ladder.Rung]) -> Result[Found
       ok(Found { actual: c.actual, at: c.at, how: step.how, by_lines: step.by_lines })
     } else {
       let at_lines = list.map(list.take(cs, 8), (c) => int.to_string(line_of(text, c.at)))
-      err("this text appears " + int.to_string(list.len(cs)) + " times (at lines " + string.join(at_lines, ", ") + (if list.len(cs) > 8 then ", …" else "") + ")" + (if step.how == "" then "" else " (" + step.how + ")") + ", so it does not say which one to change — include enough surrounding lines to make it unique: " + ladder.shown(old))
+      err("this text appears " + int.to_string(list.len(cs)) + " times (at lines " + list.join(at_lines, ", ") + (if list.len(cs) > 8 then ", …" else "") + ")" + (if step.how == "" then "" else " (" + step.how + ")") + ", so it does not say which one to change — include enough surrounding lines to make it unique: " + ladder.shown(old))
     }
   },
 }
@@ -51,7 +51,7 @@ fn reindent(new: String, old: String, actual: String) -> String = {
   let from = ladder.common_indent(ladder.search_lines(old))
   let to = ladder.common_indent(ladder.search_lines(actual))
   if from == to or new == "" then new
-  else string.join(list.map(string.split(new, "\n"), (l) =>
+  else list.join(list.map(string.split(new, "\n"), (l) =>
     if string.trim(l) == "" then l
     else to + (string.strip_prefix(l, from) ?? l)), "\n")
 }
@@ -67,7 +67,7 @@ fn placeholder_in(new: String, old: String) -> String = {
   let olds = list.map(string.split(old, "\n"), (l) => string.trim(l))
   let hits = list.filter(string.split(new, "\n"), (l) => {
     let t = string.trim(l)
-    regex.is_match(PLACEHOLDER, string.to_lower(t)) and not list.contains(olds, t)
+    regex.is_match(regex.new(PLACEHOLDER), string.to_lower(t)) and not list.contains(olds, t)
   })
   string.trim(list.first(hits) ?? "")
 }
@@ -247,7 +247,7 @@ test "in a long file the hint comes from the lines the quote got right" {
     lines = lines + ["def handler_" + int.to_string(i) + "(request, context):", "    value = compute(request.payload[" + int.to_string(i) + "], context)", "    return respond(value)", ""]
     i = i + 1
   }
-  let file = string.join(lines, "\n")
+  let file = list.join(lines, "\n")
   // First line right, the other two wrong: not found on any rung of the ladder.
   let why = failure_of(apply(file, [Replacement { old: "def handler_777(request, context):\n    value = compute(request.payload[777], ctx)\n    return respond(value, 1)", new: "x" }]))
   assert(string.contains(why, "could not find"))
@@ -262,7 +262,7 @@ test "a quote that differs from the file only in typographic punctuation is foun
   let file = "msg = \"it's done - really\"\nx = 1\n"
   let r = apply(file, [Replacement { old: "msg = \u{201C}it\u{2019}s done \u{2014} really\u{201D}", new: "msg = \"done\"" }])
   assert_eq(applied(r), "msg = \"done\"\nx = 1\n")
-  assert(string.contains(string.join(notes_of(r), " "), "typographic"))
+  assert(string.contains(list.join(notes_of(r), " "), "typographic"))
 }
 
 test "an ambiguous quote names the lines it was found at" {
@@ -275,7 +275,7 @@ test "an edit made already is skipped, not refused" {
   let again = Replacement { old: "  return sum(xs) / len(xs)", new: "  return sum(xs) / max(1, len(xs))" }
   let r = apply(file, [again])
   assert_eq(applied(r), file)
-  assert(string.contains(string.join(notes_of(r), " "), "already made"))
+  assert(string.contains(list.join(notes_of(r), " "), "already made"))
   // A short `new` found somewhere proves nothing.
   assert(string.contains(failure_of(apply("x = 1\ny = 2\n", [Replacement { old: "x = 9", new: "y = 2" }])), "could not find"))
 }

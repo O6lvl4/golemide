@@ -30,6 +30,7 @@ import process
 import self.observe
 import self.reference
 import self.solve
+import env
 
 let LANGUAGE = "almide"
 
@@ -41,7 +42,7 @@ local fn row(label: String, chars: Int, whole: Int) -> String =
     + string.pad_start(pct(chars, whole), 7, " ")
 
 effect fn main() -> Unit = {
-  let args = process.args()
+  let args = ["budget"] + env.args()
   let root = list.get(args, 1) ?? "."
   let verify = list.get(args, 2) ?? ""
   let task = list.get(args, 3) ?? "Make the verification command pass."
@@ -83,7 +84,7 @@ effect fn main() -> Unit = {
     + " with the live one in the history")
   println("")
   println("  baseline output was " + int.to_string(string.len(baseline)) + " chars, sent as " + int.to_string(string.len(excerpt)))
-  println("  files read: " + (if list.is_empty(kept) then "(none)" else string.join(kept, ", ")))
+  println("  files read: " + (if list.is_empty(kept) then "(none)" else list.join(kept, ", ")))
 
   // The duplicate this script was written to catch, reported as a regression check.
   if ref.path != "" and list.len(kept) < list.len(picked) then {

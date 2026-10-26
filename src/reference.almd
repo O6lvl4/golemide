@@ -41,7 +41,7 @@ let TOOLCHAIN: List[(String, String, List[String])] = [
 // `c++` is a language; `CAIRN_REFERENCE_C__` is the variable that overrides it.
 fn env_key(language: String) -> String = {
   var out = ""
-  for c in string.chars(string.to_upper(language)) {
+  for c in string.to_list(string.to_upper(language)) {
     out = out + (if string.is_alphanumeric(c) then c else "_")
   }
   out
@@ -135,7 +135,7 @@ test "a clipped reference says it was clipped" { assert_eq(string.contains(clip(
 test "the in-project tier records the file it read, so it is not read twice" {
   let dir = fs.temp_dir() + "/golemide-ref-test"
   let _ = fs.mkdir_p(dir)
-  let _ = fs.write(dir + "/CHEATSHEET.md", "the reference body")
+  let _ = fs.write_text(dir + "/CHEATSHEET.md", "the reference body")
   let r = in_project(dir)!
   assert_eq(r.path, "CHEATSHEET.md")
   assert_eq(r.text, "the reference body")

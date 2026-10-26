@@ -21,7 +21,7 @@ type CommandResult = { command: String, code: Int, stdout: String, stderr: Strin
 // "timed out after 3000ms". Redirected to files the same call returns in
 // 3.0 seconds. A test suite that starts a server is the ordinary case here.
 effect fn run(command: String, cwd: String, timeout_ms: Int) -> CommandResult = {
-  let t0 = env.millis()
+  let t0 = datetime.now_ms()
   let out_path = fs.create_temp_file("golemide-stdout") ?? ""
   let err_path = fs.create_temp_file("golemide-stderr") ?? ""
   let redirect = if out_path == "" or err_path == "" then ""
@@ -29,7 +29,7 @@ effect fn run(command: String, cwd: String, timeout_ms: Int) -> CommandResult = 
   // a subshell, not a brace group: `{ cmd & ; }` is a bash syntax error and a
   // verify command is allowed to end in `&`
   let script = "cd " + shell_quote(cwd) + " && ( " + command + " )" + redirect
-  let status = process.exec_status_timeout("bash", ["-c", script], timeout_ms)
+  let status = process.output(process.ProcessCommand { cmd: "bash", args: ["-c", script], timeout_ms: timeout_ms })
   // whatever was written before the deadline is still what the model needs
   let captured_out = captured(out_path)!
   let captured_err = captured(err_path)!
@@ -37,12 +37,12 @@ effect fn run(command: String, cwd: String, timeout_ms: Int) -> CommandResult = 
     ok(st) => CommandResult { command: command, code: st.code,
       stdout: if redirect == "" then st.stdout else captured_out,
       stderr: if redirect == "" then st.stderr else captured_err,
-      timed_out: false, duration_ms: env.millis() - t0, spawn_error: "" },
+      timed_out: false, duration_ms: datetime.now_ms() - t0, spawn_error: "" },
     err(e) => {
-      let timed = regex.is_match("time(d)? ?out|deadline", string.to_lower(e))
+      let timed = regex.is_match(regex.new("time(d)? ?out|deadline"), string.to_lower(e))
       CommandResult { command: command, code: -1, stdout: captured_out,
         stderr: captured_err + (if captured_err == "" then "" else "\n") + e,
-        timed_out: timed, duration_ms: env.millis() - t0, spawn_error: if timed then "" else e }
+        timed_out: timed, duration_ms: datetime.now_ms() - t0, spawn_error: if timed then "" else e }
     },
   }
 }
@@ -61,7 +61,7 @@ fn shell_quote(s: String) -> String = "'" + string.replace(s, "'", "'\\''") + "'
 // Build output and binaries, which are never the thing to edit.
 let NOISE = "(^|/)(__pycache__|\\.git|node_modules|target|dist|build|out|vendor|\\.venv|venv|\\.pytest_cache|\\.mypy_cache|\\.tox|coverage)(/|$)|\\.(pyc|pyo|class|o|a|so|dylib|dll|exe|jar|war|zip|tar|gz|bz2|xz|7z|png|jpe?g|gif|webp|ico|pdf|woff2?|ttf|eot|mp[34]|mov|wasm)$|(^|/)(package-lock\\.json|yarn\\.lock|pnpm-lock\\.yaml|Cargo\\.lock|poetry\\.lock|composer\\.lock|go\\.sum)$"
 
-fn is_noise(path: String) -> Bool = regex.is_match(NOISE, string.to_lower(path))
+fn is_noise(path: String) -> Bool = regex.is_match(regex.new(NOISE), string.to_lower(path))
 
 // Signatures of a verify command that never ran, as distinct from one that
 // ran and failed. Only the first lines: a passing suite can print "No
@@ -89,8 +89,8 @@ fn harness_failure(r: CommandResult) -> String =
   else if r.code == 0 then ""
   else {
     let lines = string.split(r.stdout + "\n" + r.stderr, "\n")
-    let head = string.to_lower(string.join(list.take(lines, 12), "\n"))
-    let signs = list.filter_map(HARNESS_BROKEN, (p) => option.map(regex.find(p.0, head), (m) => p.1 + " (" + string.trim(m) + ")"))
+    let head = string.to_lower(list.join(list.take(lines, 12), "\n"))
+    let signs = list.filter_map(HARNESS_BROKEN, (p) => option.map(regex.find(regex.new(p.0), head), (m) => p.1 + " (" + string.trim(m) + ")"))
     list.first(signs) ?? shell_not_found(r.code, lines)
   }
 
@@ -105,7 +105,7 @@ fn shell_not_found(code: Int, lines: List[String]) -> String =
   if code != 126 and code != 127 then ""
   else {
     let tail = list.filter(list.drop(lines, list.len(lines) - 12), (l) => string.trim(l) != "")
-    let hit = list.find(list.reverse(tail), (l) => regex.is_match("not found|no such file or directory|permission denied|cannot execute", string.to_lower(l)))
+    let hit = list.find(list.reverse(tail), (l) => regex.is_match(regex.new("not found|no such file or directory|permission denied|cannot execute"), string.to_lower(l)))
     match hit {
       some(l) => "the last command in it could not be run (exit " + int.to_string(code) + ": " + string.trim(l) + ")",
       none => "",
@@ -131,7 +131,7 @@ fn omitted_by_directory(all: List[String], shown: List[String]) -> String = {
   for f in list.filter(all, (f) => not list.contains(shown, f)) {
     let dir = top_dir(f)
     if not map.contains(counts, dir) then list.push(order, dir)
-    map.insert(counts, dir, (map.get(counts, dir) ?? 0) + 1)
+    counts = map.set(counts, dir, (map.get(counts, dir) ?? 0) + 1)
   }
   if list.is_empty(order) then "" else omitted_summary(order, counts)
 }
@@ -141,7 +141,7 @@ fn top_dir(f: String) -> String = match string.index_of(f, "/") { some(i) => if 
 fn omitted_summary(order: List[String], counts: Map[String, Int]) -> String = {
   let ranked = list.sort_by(order, (d) => 0 - (map.get(counts, d) ?? 0))
   let total = list.sum(list.map(ranked, (d) => map.get(counts, d) ?? 0))
-  let head = string.join(list.map(list.take(ranked, 12), (d) => d + " (" + int.to_string(map.get(counts, d) ?? 0) + ")"), ", ")
+  let head = list.join(list.map(list.take(ranked, 12), (d) => d + " (" + int.to_string(map.get(counts, d) ?? 0) + ")"), ", ")
   let rest = if list.len(ranked) > 12 then ", and " + int.to_string(list.len(ranked) - 12) + " more" else ""
   "… " + int.to_string(total) + " further file(s) not listed, under: " + head + rest
 }
@@ -178,7 +178,7 @@ effect fn observe_dir(root: String, verify_given: String, file_limit: Int, verif
 // Keep the last `n` lines — test runners put the failure at the end.
 fn tail(s: String, n: Int) -> String = {
   let lines = string.split(s, "\n")
-  if list.len(lines) <= n then s else string.join(list.drop(lines, list.len(lines) - n), "\n")
+  if list.len(lines) <= n then s else list.join(list.drop(lines, list.len(lines) - n), "\n")
 }
 
 type Read = { path: String, content: String, truncated: Bool, error: String }
@@ -187,11 +187,11 @@ type Read = { path: String, content: String, truncated: Bool, error: String }
 // cannot silently turn a prefix into a complete editable file.
 fn decode_hew_read(raw: String, full: String, rel: String, limit: Int) -> Result[Read, String] = {
   let j = json.parse(raw)!
-  guard (json.get_int(j, "schema_version") ?? 0) == 1 else err("unsupported read schema")
-  guard (json.get_string(j, "path") ?? "") == full else err("read path mismatch")
-  let content = json.get_string(j, "content") |> option.to_result("missing content")!
-  let complete = json.get_bool(j, "complete") |> option.to_result("missing completeness")!
-  let total = json.get_int(j, "total_chars") |> option.to_result("missing length")!
+  guard (value.get_int(j, "schema_version") ?? 0) == 1 else err("unsupported read schema")
+  guard (value.get_string(j, "path") ?? "") == full else err("read path mismatch")
+  let content = value.get_string(j, "content") |> option.to_result("missing content")!
+  let complete = value.get_bool(j, "complete") |> option.to_result("missing completeness")!
+  let total = value.get_int(j, "total_chars") |> option.to_result("missing length")!
   let count = string.len(content)
   guard count <= limit and total >= count else err("invalid read length")
   guard complete == (total == count) else err("inconsistent completeness")
@@ -207,7 +207,7 @@ effect fn builtin_read(root: String, rel: String, limit: Int) -> Read = match fs
 }
 
 effect fn hew_read(full: String, rel: String, limit: Int) -> Result[Read, String] = {
-  let st = process.exec_status_timeout("hew", ["read-json", full, "--max-chars", int.to_string(limit)], 20000)!
+  let st = process.output(process.ProcessCommand { cmd: "hew", args: ["read-json", full, "--max-chars", int.to_string(limit)], timeout_ms: 20000 })!
   guard st.code == 0 else err("hew read failed")
   decode_hew_read(st.stdout, full, rel, limit)
 }
@@ -248,9 +248,9 @@ test "a program the shell could not find after a long build is a broken command"
   var i = 0
   while i < 40 { list.push(out, "[ 50%] Building CXX object CMakeFiles/clock.dir/clock.cpp.o"); i = i + 1 }
   list.push(out, "bash: line 1: ./build/clock_tests: No such file or directory")
-  let r = CommandResult { command: "cmake --build build && ./build/clock_tests", code: 127, stdout: string.join(out, "\n"), stderr: "", timed_out: false, duration_ms: 9000, spawn_error: "" }
+  let r = CommandResult { command: "cmake --build build && ./build/clock_tests", code: 127, stdout: list.join(out, "\n"), stderr: "", timed_out: false, duration_ms: 9000, spawn_error: "" }
   assert(string.starts_with(harness_failure(r), "the last command in it could not be run (exit 127"))
   // The same words from a test that failed are the test's business.
-  let failed = CommandResult { command: "pytest", code: 1, stdout: string.join(out, "\n") + "\nFileNotFoundError: No such file or directory: 'x'", stderr: "", timed_out: false, duration_ms: 900, spawn_error: "" }
+  let failed = CommandResult { command: "pytest", code: 1, stdout: list.join(out, "\n") + "\nFileNotFoundError: No such file or directory: 'x'", stderr: "", timed_out: false, duration_ms: 900, spawn_error: "" }
   assert_eq(harness_failure(failed), "")
 }

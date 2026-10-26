@@ -37,8 +37,8 @@ effect fn package_json_test(path: String) -> String = match fs.read_text(path) {
 }
 
 fn test_script_command(pkg: Value) -> String = {
-  let script = match value.field(pkg, "scripts") { ok(s) => json.get_string(s, "test") ?? "", err(_) => "" }
-  let pm = list.first(string.split(json.get_string(pkg, "packageManager") ?? "", "@")) ?? ""
+  let script = match value.get(pkg, "scripts") { some(s) => value.get_string(s, "test") ?? "", none => "" }
+  let pm = list.first(string.split(value.get_string(pkg, "packageManager") ?? "", "@")) ?? ""
   if script == "" or string.contains(string.to_lower(script), "no test specified") then ""
   else (if list.contains(["pnpm", "yarn", "bun"], pm) then pm else "npm") + " test"
 }
@@ -72,6 +72,6 @@ fn language_of_ext(ext: String) -> String? = option.map(list.find(EXTENSION_LANG
 // The language most of these files are written in, if one dominates.
 fn language_from_files(files: List[String]) -> String? = {
   var counts: Map[String, Int] = [:]
-  for l in list.filter_map(files, (f) => language_of_ext(extension_of(f))) { map.insert(counts, l, (map.get(counts, l) ?? 0) + 1) }
-  option.map(list.first(list.sort_by(map.entries(counts), (e) => 0 - e.1)), (e) => e.0)
+  for l in list.filter_map(files, (f) => language_of_ext(extension_of(f))) { { counts = map.set(counts, l, (map.get(counts, l) ?? 0) + 1) } }
+  option.map(list.first(list.sort_by(map.to_list(counts), (e) => 0 - e.1)), (e) => e.0)
 }
