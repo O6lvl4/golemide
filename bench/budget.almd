@@ -26,10 +26,11 @@
 // Reading the output: `reference` is the floor — it is the point of the tool, and on
 // Almide it is ~41 KB. Anything else that approaches it deserves an explanation.
 
-import process
 import self.observe
 import self.reference
-import self.solve
+import self.looking
+import self.reading
+import self.prompts
 import env
 
 let LANGUAGE = "almide"
@@ -52,19 +53,19 @@ effect fn main() -> Unit = {
   let ref = reference.reference_for(root, LANGUAGE)!
   let ref_text = reference.render(ref)
   let baseline = match obs.baseline { some(b) => b.stdout + "\n" + b.stderr, none => "" }
-  let excerpt = solve.failure_view(verify, baseline, root, 60, true)!
-  let context = solve.render_observation(obs, task, excerpt, ref_text, true)
-  let retry_context = solve.render_observation(obs, task, "", ref_text, false)
+  let excerpt = looking.failure_view(verify, baseline, root, 60, true)!
+  let context = looking.render_observation(obs, task, excerpt, ref_text, true)
+  let retry_context = looking.render_observation(obs, task, "", ref_text, false)
 
   // What selection would pick, and what it picks after the reference is taken out.
   let picked = list.take(obs.files, 6)
-  let kept = solve.paths_to_read(picked, ref.path)
-  let (block, _) = solve.render_files(root, kept, true)!
-  let prompt = solve.edit_prompt(context, block, "", false, verify)
+  let kept = looking.paths_to_read(picked, ref.path)
+  let (block, _) = reading.render_files(root, kept, true)!
+  let prompt = prompts.edit_prompt(context, block, "", false, verify)
   let whole = string.len(prompt)
   // Attempt 2+ with an empty history is not a real prompt — the history is what a
   // retry adds. It isolates one thing: what the first attempt's stale baseline cost.
-  let retry_bare = string.len(solve.edit_prompt(retry_context, block, "", false, verify))
+  let retry_bare = string.len(prompts.edit_prompt(retry_context, block, "", false, verify))
 
   println("root      " + root)
   println("verify    " + verify)
@@ -88,7 +89,7 @@ effect fn main() -> Unit = {
 
   // The duplicate this script was written to catch, reported as a regression check.
   if ref.path != "" and list.len(kept) < list.len(picked) then {
-    let (dup_block, _) = solve.render_files(root, picked, true)!
+    let (dup_block, _) = reading.render_files(root, picked, true)!
     let dup = string.len(dup_block) - string.len(block)
     println("")
     println("  " + ref.path + " is the reference and is NOT read again: " + int.to_string(dup)
