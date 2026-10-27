@@ -18,7 +18,7 @@ fn codes_in(output: String, pattern: String) -> List[String] = {
   var out: List[String] = []
   for m in regex.find_all(regex.new(pattern), output) {
     match regex.captures(regex.new(pattern), m) {
-      some(cs) => { let code = list.get(cs, 1) ?? ""; if code != "" and not list.contains(out, code) then list.push(out, code) },
+      some(cs) => { let code = option.flatten(list.get(cs, 1)) ?? ""; if code != "" and not list.contains(out, code) then list.push(out, code) },
       none => (),
     }
   }

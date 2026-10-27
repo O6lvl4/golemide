@@ -37,7 +37,7 @@ fn budget_after(last_ms: Int, rung: Rung, escalated: Bool) -> (Int, String) =
 
 // What makes two failures "the same failure": digits and hex collapsed.
 fn failure_key(why: String) -> String =
-  string.take(string.trim(regex.replace(regex.new("\\s+"), regex.replace("\\d+(\\.\\d+)?", regex.replace("0x[0-9a-fA-F]+", why, "#"), "#"), " ")), 600)
+  string.take(string.trim(regex.replace(regex.new("\\s+"), regex.replace(regex.new("\\d+(\\.\\d+)?"), regex.replace(regex.new("0x[0-9a-fA-F]+"), why, "#"), "#"), " ")), 600)
 
 test "failures are keyed without numbers" {
   assert_eq(failure_key("took 0.012s at 0x7fff"), "took #s at #")

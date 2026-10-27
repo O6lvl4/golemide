@@ -44,7 +44,7 @@ effect fn load(dirs: List[String]) -> List[String] = {
       match fs.read_text(p) {
         err(_) => (),
         ok(text) => for (k, v) in parse_env(text) {
-          if (env.get(k) ?? "") == "" then { env.set(k, v); list.push(loaded, k) }
+          if (env.get(k) ?? "") == "" then { env.set(k, v)!; list.push(loaded, k) }
         },
       }
     }

@@ -47,8 +47,8 @@ fn looks_truncated(text: String) -> Bool = {
   else not (string.ends_with(t, "}") or string.ends_with(t, "]"))
 }
 
-fn strip_fence(s: String) -> String = match regex.captures(regex.new("```(?:json|jsonc)?\\s*\\n([\\s\\S]*?)```"), s) {
-  some(cs) => string.trim(list.get(cs, 1) ?? ""),
+fn strip_fence(s: String) -> String = match regex.captures(regex.new("```(?:json|jsonc)?\\s*\\n((?:.|\\n)*?)```"), s) {
+  some(cs) => string.trim(option.flatten(list.get(cs, 1)) ?? ""),
   none => "",
 }
 
