@@ -80,16 +80,16 @@ effect fn configured(ext: String) -> Checker? = {
 
 fn manifest_supports(raw: String, path: String) -> Bool = match json.parse(raw) {
   err(_) => false,
-  ok(j) => (json.get_int(j, "schema_version") ?? 0) == 1 and
-    list.any(json.get_array(j, "packages") ?? [], (p) => {
-      let caps = list.filter_map(json.get_array(p, "capabilities") ?? [], (v) => match value.as_string(v) { ok(s) => some(s), err(_) => none })
-      let exts = list.filter_map(json.get_array(p, "extensions") ?? [], (v) => match value.as_string(v) { ok(s) => some(s), err(_) => none })
+  ok(j) => (value.get_int(j, "schema_version") ?? 0) == 1 and
+    list.any(value.get_array(j, "packages") ?? [], (p) => {
+      let caps = list.filter_map(value.get_array(p, "capabilities") ?? [], (v) => match value.as_string(v) { ok(s) => some(s), err(_) => none })
+      let exts = list.filter_map(value.get_array(p, "extensions") ?? [], (v) => match value.as_string(v) { ok(s) => some(s), err(_) => none })
       list.contains(caps, "check") and list.any(exts, (ext) => string.starts_with(ext, ".") and string.len(ext) > 1 and string.ends_with(path, ext))
     }),
 }
 
 effect fn gramide_supports(path: String, ext: String) -> Bool = {
-  match process.exec_status_timeout("gramide", ["languages"], 3000) {
+  match process.output(process.ProcessCommand { cmd: "gramide", args: ["languages"], timeout_ms: 3000 }) {
     err(_) => false,
     ok(st) => if st.code == 0 then manifest_supports(st.stdout, path)
       else string.contains(st.stderr, "usage: gramide") and list.contains(LEGACY_GRAMIDE_EXTS, ext),
@@ -125,7 +125,7 @@ effect fn run_checker(c: Checker, tmp: String) -> Verdict =
   if c.label == "" then Verdict { kind: "ok", why: "" }
   else {
     let args = list.map(c.args, (a) => if a == "{}" then tmp else a)
-    match process.exec_status_timeout(c.program, args, 30000) {
+    match process.output(process.ProcessCommand { cmd: c.program, args: args, timeout_ms: 30000 }) {
       // ask PATH, do not read the error text: a checker that exists and crashed
       // is a different fact from one that is not installed (ADR-0004)
       err(e) => if on_path(c.program)! then Verdict { kind: "invalid", why: e } else Verdict { kind: "unavailable", why: "" },
@@ -165,7 +165,7 @@ effect fn write_gated(path: String, source: String) -> Result[Written, String] =
   let name = list.last(string.split(path, "/")) ?? path
   let ext = ecosystem.extension_of(path)
   let tmp = dir + "/." + name + ".golemide.tmp" + (if ext == "" then "" else "." + ext)
-  fs.write(tmp, source) |> result.map_err((e) => "edit.write: " + e)!
+  fs.write_text(tmp, source) |> result.map_err((e) => "edit.write: " + e)!
   let v = run_checker(c, tmp)!
   if v.kind == "invalid" then {
     let why = explain_refusal(path, tmp, v.why)!
@@ -174,7 +174,7 @@ effect fn write_gated(path: String, source: String) -> Result[Written, String] =
   }
   else {
     fs.rename(tmp, path) |> result.map_err((e) => "edit.write: rename: " + e)!
-    ok(Written { path: path, bytes: list.len(string.to_bytes(source)), checked: if v.kind == "ok" and c.label != "" then c.label else "" })
+    ok(Written { path: path, bytes: list.len(bytes.to_list(bytes.from_string(source))), checked: if v.kind == "ok" and c.label != "" then c.label else "" })
   }
 }
 

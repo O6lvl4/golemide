@@ -75,7 +75,7 @@ fn parse_args(argv: List[String]) -> Args = {
   while i < list.len(argv) {
     let a = list.get(argv, i) ?? ""
     match string.strip_prefix(a, "--") {
-      some(name) => if list.contains(VALUED, name) then { map.insert(flags, name, list.get(argv, i + 1) ?? ""); i = i + 1 } else map.insert(flags, name, "true"),
+      some(name) => if list.contains(VALUED, name) then { { flags = map.set(flags, name, list.get(argv, i + 1) ?? "") }; i = i + 1 } else { flags = map.set(flags, name, "true") },
       none => list.push(rest, a),
     }
     i = i + 1
@@ -109,7 +109,7 @@ effect fn llm_test(a: Args) -> Result[Unit, String] = {
 
 effect fn run_observe(a: Args) -> Result[Unit, String] = {
   let root = map.get(a.flags, "root") ?? (env.cwd() ?? ".")
-  let (rm, rmw) = repo_map(root, string.join(a.rest, " "))!
+  let (rm, rmw) = repo_map(root, list.join(a.rest, " "))!
   let obs = observe.observe(root, map.get(a.flags, "verify") ?? "", 400, 120000, rm, rmw)!
   println("root: " + obs.root)
   println("language: " + (option.map(obs.fingerprint, (f) => f.language + " (" + f.marker + ")") ?? "unknown"))
@@ -126,7 +126,7 @@ effect fn run_observe(a: Args) -> Result[Unit, String] = {
 // exit 0 solved, 1 not solved, 2 setup error, 3 nothing to do / harness broken,
 // 4 edits written with no verify command to check them (see report.exit_code)
 effect fn run_solve(a: Args) -> Result[Int, String] = {
-  let task = string.trim(string.join(a.rest, " "))
+  let task = string.trim(list.join(a.rest, " "))
   let root = map.get(a.flags, "root") ?? (env.cwd() ?? ".")
   let quiet = map.contains(a.flags, "quiet")
   if task == "" then err("solve needs a task description")
@@ -139,7 +139,7 @@ effect fn run_solve(a: Args) -> Result[Int, String] = {
 effect fn run_polish(a: Args) -> Result[Int, String] = {
   let root = map.get(a.flags, "root") ?? (env.cwd() ?? ".")
   let quiet = map.contains(a.flags, "quiet")
-  let focus = string.trim(string.join(a.rest, " "))
+  let focus = string.trim(list.join(a.rest, " "))
   let task = "Simplify the code without changing what it does."
     + (if focus == "" then "" else " Concentrate on: " + focus)
   solve_with(a, task, root, quiet, true)

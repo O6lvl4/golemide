@@ -47,8 +47,8 @@ let LINE_NUMBER_PREFIX = "^\\s*[0-9]+(: |\\t|│ ?)"
 fn strip_line_numbers(needle: String) -> String? = {
   let lines = string.split(needle, "\n")
   let numbered = list.filter(lines, (l) => l != "")
-  if list.is_empty(numbered) or not list.all(numbered, (l) => regex.is_match(LINE_NUMBER_PREFIX, l)) then none
-  else some(string.join(list.map(lines, (l) => regex.replace(LINE_NUMBER_PREFIX, l, "")), "\n"))
+  if list.is_empty(numbered) or not list.all(numbered, (l) => regex.is_match(regex.new(LINE_NUMBER_PREFIX), l)) then none
+  else some(list.join(list.map(lines, (l) => regex.replace(regex.new(LINE_NUMBER_PREFIX), l, "")), "\n"))
 }
 
 // `\n` written as backslash-n, and the same for tab, quotes and the backslash itself.
@@ -58,7 +58,7 @@ let ESCAPED: List[(String, String)] = [("n", "\n"), ("t", "\t"), ("\"", "\""), (
 fn escaped(c: String) -> String? = option.map(list.find(ESCAPED, (e) => e.0 == c), (e) => e.1)
 
 fn unescape(needle: String) -> String = {
-  let cs = string.chars(needle)
+  let cs = string.to_list(needle)
   var out: List[String] = []
   var i = 0
   while i < list.len(cs) {
@@ -68,7 +68,7 @@ fn unescape(needle: String) -> String = {
       none => { list.push(out, c); i = i + 1 },
     }
   }
-  string.join(out, "")
+  list.join(out, "")
 }
 
 // The line-based steps compare blocks of the same height, and hand back the file's own
@@ -104,7 +104,7 @@ fn blocks_where(text: String, needle: String, min_height: Int, accept: fn(List[S
     while i + k <= list.len(lines) {
       if string.trim(list.get(lines, i) ?? "") == first then {
         let block = list.slice(lines, i, i + k)
-        if accept(block, want) then list.push(out, Candidate { actual: string.join(block, "\n"), at: list.get(offsets, i) ?? 0 })
+        if accept(block, want) then list.push(out, Candidate { actual: list.join(block, "\n"), at: list.get(offsets, i) ?? 0 })
       }
       i = i + 1
     }
@@ -128,14 +128,14 @@ fn common_indent(lines: List[String]) -> String = {
 
 fn dedent(lines: List[String]) -> String = {
   let n = string.len(common_indent(lines))
-  string.join(list.map(lines, (l) => if string.trim(l) == "" then l else string.drop(l, n)), "\n")
+  list.join(list.map(lines, (l) => if string.trim(l) == "" then l else string.drop(l, n)), "\n")
 }
 
 fn same_dedented(block: List[String], want: List[String]) -> Bool = dedent(block) == dedent(want)
 
 fn levenshtein(a: String, b: String) -> Int = {
-  let xs = string.chars(a)
-  let ys = string.chars(b)
+  let xs = string.to_list(a)
+  let ys = string.to_list(b)
   let m = list.len(ys)
   var prev: List[Int] = list.range(0, m + 1)
   var i = 1
@@ -156,7 +156,7 @@ fn levenshtein(a: String, b: String) -> Int = {
 
 fn similarity(a: String, b: String) -> Float = {
   let n = int.max(string.len(a), string.len(b))
-  if a == b or n == 0 then 1.0 else 1.0 - int.to_float(levenshtein(a, b)) / int.to_float(n)
+  if a == b or n == 0 then 1.0 else 1.0 - float.from(levenshtein(a, b)) / float.from(n)
 }
 
 // First and last lines equal once trimmed, and the lines between close enough on
@@ -169,7 +169,7 @@ fn anchored(block: List[String], want: List[String]) -> Bool = {
   else {
     let middle = list.slice(list.zip(block, want), 1, k - 1)
     let total = list.fold(middle, 0.0, (acc, p) => acc + similarity(string.trim(p.0), string.trim(p.1)))
-    total / int.to_float(k - 2) >= BLOCK_ANCHOR_MIN_SIMILARITY
+    total / float.from(k - 2) >= BLOCK_ANCHOR_MIN_SIMILARITY
   }
 }
 
@@ -186,7 +186,7 @@ let PLAIN: List[(String, List[String])] = [
 
 fn plain_char(c: String) -> String = match list.find(PLAIN, (p) => list.contains(p.1, c)) { some(p) => p.0, none => c }
 
-fn plain(s: String) -> String = string.join(list.map(string.chars(s), plain_char), "")
+fn plain(s: String) -> String = list.join(list.map(string.to_list(s), plain_char), "")
 
 fn plain_punctuation(text: String, needle: String) -> List[Candidate] = {
   let t = plain(text)

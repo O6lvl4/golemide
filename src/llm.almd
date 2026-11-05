@@ -102,8 +102,8 @@ fn effort_for(model: String, effort: String) -> String =
   if (live.split_model(model)).0 == "cf" then effort else ""
 
 fn messages_of(req: Request) -> List[Value] =
-  (if req.system == "" then [] else [value.object([("role", value.str("system")), ("content", value.str(req.system))])])
-    + [value.object([("role", value.str("user")), ("content", value.str(req.prompt))])]
+  (if req.system == "" then [] else [value.object([("role", value.string("system")), ("content", value.string(req.system))])])
+    + [value.object([("role", value.string("user")), ("content", value.string(req.prompt))])]
 
 // One request, hedged: the same body sent a second time if the first is slow,
 // and the first answer to land is the one used.

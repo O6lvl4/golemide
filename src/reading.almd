@@ -20,7 +20,7 @@ effect fn render_files(root: String, paths: List[String], quiet: Bool) -> (Strin
       list.push(chunks, outline_of(root, p, r, hew)! + "--- " + p + size_of(r) + " ---\n" + r.content)
     }
   }
-  (string.join(chunks, "\n\n"), read)
+  (list.join(chunks, "\n\n"), read)
 }
 
 // The file at the usual budget, or at the wide one when that makes it complete.
@@ -66,8 +66,8 @@ fn size_of(r: observe.Read) -> String =
 test "expanded reads retain the tail and partial files are not editable" {
   let root = fs.create_temp_dir("golemide-read-contract")!
   let medium = "// " + string.repeat("x", 30000) + "\nfn tail_marker() {}\n"
-  fs.write(root + "/medium.rs", medium)!
-  fs.write(root + "/large.rs", "// " + string.repeat("x", 97000) + "\nfn unseen_tail() {}\n")!
+  fs.write_text(root + "/medium.rs", medium)!
+  fs.write_text(root + "/large.rs", "// " + string.repeat("x", 97000) + "\nfn unseen_tail() {}\n")!
   let (context, editable) = render_files(root, ["medium.rs", "large.rs"], true)!
   assert(string.contains(context, "fn tail_marker() {}"))
   assert(list.contains(editable, "medium.rs"))
@@ -94,7 +94,7 @@ test "expanded reads retain the tail and partial files are not editable" {
 // The header carries the size because the model has to reproduce it exactly.
 test "an editable file is headed with the size a replacement has to match" {
   let root = fs.create_temp_dir("golemide-header")!
-  fs.write(root + "/small.rs", "fn a() {}\nfn b() {}\n")!
+  fs.write_text(root + "/small.rs", "fn a() {}\nfn b() {}\n")!
   let (context, editable) = render_files(root, ["small.rs"], true)!
   assert(string.contains(context, "3 lines, 20 bytes"))
   assert(string.contains(context, "a replacement must be all of it"))

@@ -43,7 +43,7 @@ type Run = { attempts: List[results.Attempt], warnings: List[String], cost: Floa
 type Given = { creds: llm.Credentials, obs: observe.Observation, opts: Options, context: String, retry_context: String, findings: String }
 
 effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, opts: Options) -> Result[results.Outcome, String] = {
-  let started = env.millis()
+  let started = datetime.now_ms()
   let quiet = opts.quiet
   let dirty_before = results.changed_files(obs.root)!
   let baseline_excerpt = match obs.baseline { some(b) => looking.failure_view(b.command, b.stdout + "\n" + b.stderr, obs.root, 60, quiet)!, none => "" }
@@ -70,9 +70,9 @@ effect fn solve(creds: llm.Credentials, task: String, obs: observe.Observation, 
       unusable: 0, last_ms: 0, stuck: 0, last_key: "", n: 1, finished: false, polishing: opts.polish_only,
       polish_left: if opts.polish_only then 0 else opts.polish, succeeded: opts.polish_only, polish_kept: none,
       snapshot: if opts.polish_only then saving.snapshot_of(obs.root, paths)! else [], originals: [] }
-    while not r.finished and (r.n <= opts.max_attempts or r.polishing) and not out_of_time(opts, env.millis() - started, r.last_ms) { r = attempt(g, r)! }
-    if not r.finished and r.n <= opts.max_attempts and out_of_time(opts, env.millis() - started, r.last_ms) then {
-      let note = deadline_note(list.len(r.attempts), env.millis() - started, opts.deadline_ms)
+    while not r.finished and (r.n <= opts.max_attempts or r.polishing) and not out_of_time(opts, datetime.now_ms() - started, r.last_ms) { r = attempt(g, r)! }
+    if not r.finished and r.n <= opts.max_attempts and out_of_time(opts, datetime.now_ms() - started, r.last_ms) then {
+      let note = deadline_note(list.len(r.attempts), datetime.now_ms() - started, opts.deadline_ms)
       notes.note(quiet, note)!
       r = { ...r, warnings: r.warnings + [note] }
     }
@@ -101,7 +101,7 @@ test "a deadline stops the run before an attempt that would not fit" {
 
 effect fn already_passing(obs: observe.Observation, started: Int) -> Result[results.Outcome, String] = {
   let (count, ms) = ask.throttle_waits()!
-  ok(results.Outcome { ok: true, attempts: [], changed: [], cost_usd: 0.0, wall_ms: env.millis() - started,
+  ok(results.Outcome { ok: true, attempts: [], changed: [], cost_usd: 0.0, wall_ms: datetime.now_ms() - started,
     warnings: ["the verify command already passes: `" + obs.verify_command + "` exited 0 before anything ran, so nothing was changed"],
     harness_broken: "", polish_kept: none, unverified: false, diff: "", throttled: count, throttled_ms: ms })
 }
@@ -118,7 +118,7 @@ effect fn chosen_paths(creds: llm.Credentials, context: String, obs: observe.Obs
   // reference is known.
   let paths = looking.paths_to_read(selected, ref_path)
   if list.len(paths) < list.len(selected) then notes.note(opts.quiet, "not re-reading " + ref_path + ": it is the language reference, already in the prompt")!
-  if not opts.quiet then eprintln("  reading: " + (if list.is_empty(paths) then "(nothing)" else string.join(paths, ", ")))
+  if not opts.quiet then eprintln("  reading: " + (if list.is_empty(paths) then "(nothing)" else list.join(paths, ", ")))
   ok((paths, cost))
 }
 
@@ -142,7 +142,7 @@ effect fn explored(creds: llm.Credentials, context: String, obs: observe.Observa
 // written, the verify command run, and what the next attempt needs to know.
 effect fn attempt(g: Given, r: Run) -> Result[Run, String] = {
   let quiet = g.opts.quiet
-  let started_at = env.millis()
+  let started_at = datetime.now_ms()
   let (throttled_before, throttled_ms_before) = ask.throttle_waits()!
   notes.phase(quiet, "edit", if r.polishing then "polish" else "attempt " + int.to_string(r.n) + "/" + int.to_string(g.opts.max_attempts))!
   let (block, read) = reading.render_files(g.obs.root, r.paths, quiet)!
@@ -158,7 +158,7 @@ effect fn attempt(g: Given, r: Run) -> Result[Run, String] = {
   let unusable = unusable_after(r.unusable, a, quiet)!
   let (verify, passed, broken) = checked(g, a, r.n, started_at, throttled_before, throttled_ms_before)!
   let unverified_now = a.apply_error == "" and g.obs.verify_command == ""
-  let ms = env.millis() - started_at
+  let ms = datetime.now_ms() - started_at
   let tried = results.Attempt { n: r.n, read: read, edits: a.edits, rejected: a.rejected, apply_error: a.apply_error, verify: verify, cost_usd: a.cost, ms: ms, explanation: a.explanation, ok: passed, model: model }
   // No verify command: the edits are written and that is the end of it. This used to
   // fall through to the next attempt, where the history said "result: FAILED" with no
@@ -209,7 +209,7 @@ effect fn one_round(g: Given, prompt: String, read: List[String], model: String,
     ok(a) => {
       notes.note_hedges(quiet, a.hedged, a.hedge_wins)!
       let batch = editing.collect_edits(g.obs, a.value, read, g.opts.allow_create, quiet, before.edits)!
-      { ...before, cost: before.cost + a.cost_usd, explanation: json.get_string(a.value, "explanation") ?? "", edits: batch.edits,
+      { ...before, cost: before.cost + a.cost_usd, explanation: value.get_string(a.value, "explanation") ?? "", edits: batch.edits,
         rejected: before.rejected + batch.rejected }
     },
   }
@@ -221,7 +221,7 @@ effect fn one_round(g: Given, prompt: String, read: List[String], model: String,
 // An attempt that wrote nothing says why.
 fn without_silence(a: Answer) -> Answer =
   if not list.is_empty(a.edits) or a.apply_error != "" then a
-  else { ...a, apply_error: if list.is_empty(a.rejected) then "the model produced no edits at all" else "every edit was rejected: " + string.join(list.map(a.rejected, (r) => r.why), "; ") }
+  else { ...a, apply_error: if list.is_empty(a.rejected) then "the model produced no edits at all" else "every edit was rejected: " + list.join(list.map(a.rejected, (r) => r.why), "; ") }
 
 effect fn unusable_after(unusable: Int, a: Answer, quiet: Bool) -> Result[Int, String] =
   if not list.is_empty(a.edits) then ok(unusable)
@@ -240,7 +240,7 @@ effect fn checked(g: Given, a: Answer, n: Int, started_at: Int, throttled_before
     let v = observe.run(g.obs.verify_command, g.obs.root, g.opts.verify_timeout_ms)!
     let passed = v.code == 0
     if not quiet then eprintln("  " + (if passed then "PASS" else "FAIL") + " (exit " + int.to_string(v.code) + ", " + int.to_string(v.duration_ms) + "ms)")
-    notes.note(quiet, "attempt " + int.to_string(n) + " took " + int.to_string((env.millis() - started_at) / 1000) + "s"
+    notes.note(quiet, "attempt " + int.to_string(n) + " took " + int.to_string((datetime.now_ms() - started_at) / 1000) + "s"
       + notes.throttle_note(ask.throttle_waits()!, throttled_before, throttled_ms_before))!
     let broken = results.mid_run_harness_failure(v, g.obs.baseline)
     if broken != "" then notes.note(quiet, "verify command is broken: " + broken)!
@@ -297,7 +297,7 @@ effect fn outcome_of(g: Given, r: Run, dirty_before: List[String], started: Int)
   let solved = r.succeeded or (option.map(list.last(r.attempts), (a) => a.ok) ?? false)
   let warnings = if solved then r.warnings + results.gaming_warnings(obs, r.attempts, changed)! else r.warnings
   let (throttle_count, throttle_ms) = ask.throttle_waits()!
-  ok(results.Outcome { ok: solved, attempts: r.attempts, changed: changed, cost_usd: r.cost, wall_ms: env.millis() - started, warnings: warnings,
+  ok(results.Outcome { ok: solved, attempts: r.attempts, changed: changed, cost_usd: r.cost, wall_ms: datetime.now_ms() - started, warnings: warnings,
     harness_broken: r.harness_broken, polish_kept: r.polish_kept, unverified: r.unverified, diff: diffing.run_diff(obs.root, r.originals)!,
     throttled: throttle_count, throttled_ms: throttle_ms })
 }

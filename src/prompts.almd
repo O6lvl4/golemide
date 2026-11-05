@@ -55,12 +55,12 @@ let SAME_FAILURE_NOTE = "THE SAME FAILURE AS THE PREVIOUS ATTEMPT. The last chan
 // original.
 fn attempt_record(n: Int, edits: List[editing.Edit], explanation: String, diffs: List[String],
                   rejected: List[editing.Rejected], why: String, repeat_note: String, explanations: String) -> String = {
-  let touched = if list.is_empty(edits) then "(nothing)" else string.join(list.map(edits, (e) => e.path), ", ")
+  let touched = if list.is_empty(edits) then "(nothing)" else list.join(list.map(edits, (e) => e.path), ", ")
   let rejection_note = if list.is_empty(rejected) then ""
-    else "rejected before it ran:\n" + string.join(list.map(rejected, (r) => "  " + r.path + ": " + r.why), "\n") + "\n"
+    else "rejected before it ran:\n" + list.join(list.map(rejected, (r) => "  " + r.path + ": " + r.why), "\n") + "\n"
   "\nAttempt " + int.to_string(n) + ": edited " + touched + "\n"
     + (if explanation != "" then "intent: " + explanation + "\n" else "")
-    + (if list.is_empty(diffs) then "" else "changed:\n" + string.join(diffs, "\n") + "\n")
+    + (if list.is_empty(diffs) then "" else "changed:\n" + list.join(diffs, "\n") + "\n")
     + rejection_note + "result: FAILED\n" + why + "\n" + repeat_note + explanations
 }
 
@@ -79,7 +79,7 @@ effect fn explained_diagnostics(obs: observe.Observation, text: String, label: S
       let found = explain.explain(text, ex, obs.root)!
       if list.is_empty(found) then ok("")
       else {
-        notes.note(quiet, label + string.join(list.map(found, (f) => f.code), ", "))!
+        notes.note(quiet, label + list.join(list.map(found, (f) => f.code), ", "))!
         ok("\n" + explain.render_explanations(found) + "\n")
       }
     },
@@ -87,9 +87,9 @@ effect fn explained_diagnostics(obs: observe.Observation, text: String, label: S
 }
 
 effect fn repair_prompt(obs: observe.Observation, rejected: List[editing.Rejected], quiet: Bool) -> Result[String, String] = {
-  let explained = explained_diagnostics(obs, string.join(list.map(rejected, (x) => x.why), "\n"), "explained the rejection: ", quiet)!
+  let explained = explained_diagnostics(obs, list.join(list.map(rejected, (x) => x.why), "\n"), "explained the rejection: ", quiet)!
   ok("\n\n=== YOUR PREVIOUS ANSWER WAS REJECTED ===\n"
-    + string.join(list.map(rejected, (x) => "- " + x.path + ": " + x.why), "\n") + explained
+    + list.join(list.map(rejected, (x) => "- " + x.path + ": " + x.why), "\n") + explained
     + "\nAnswer again. For each file, `source` is the complete file.")
 }
 

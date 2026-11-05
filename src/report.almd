@@ -16,13 +16,13 @@ import self.observe
 let OUTPUT_TAIL_LINES = 40
 
 fn usd(x: Float) -> String = {
-  let micros = float.to_int(x * 1000000.0 + 0.5)
+  let micros = int.from_saturating(x * 1000000.0 + 0.5)
   "$" + int.to_string(micros / 1000000) + "." + string.pad_start(int.to_string(micros % 1000000), 6, "0")
 }
 
 // The cost as JSON, at the precision `usd` prints. Token prices reach the sum through
 // single-precision arithmetic, and 0.000156 arrived as 0.00015620000249147415.
-fn usd_value(x: Float) -> Value = value.float(float.from_int(float.to_int(x * 1000000.0 + 0.5)) / 1000000.0)
+fn usd_value(x: Float) -> Value = value.float(float.from(int.from_saturating(x * 1000000.0 + 0.5)) / 1000000.0)
 
 // exit 0 solved, 1 not solved, 2 setup error, 3 nothing to do or the verify command
 // broke before anything ran, 4 edits written with nothing to check them.
@@ -46,21 +46,21 @@ fn failure_reason(r: results.Outcome) -> String = match list.last(r.attempts) {
 
 fn human(r: results.Outcome, polish_only: Bool) -> String = {
   var lines = ["\n" + headline(r, polish_only) + " in " + int.to_string(list.len(r.attempts)) + " attempt(s), " + usd(r.cost_usd) + ", " + int.to_string(r.wall_ms / 1000) + "s"]
-  if not list.is_empty(r.changed) then list.push(lines, "changed: " + string.join(r.changed, ", "))
+  if not list.is_empty(r.changed) then list.push(lines, "changed: " + list.join(r.changed, ", "))
   if r.throttled > 0 then list.push(lines, "rate limited " + int.to_string(r.throttled) + " time(s): " + int.to_string(r.throttled_ms / 1000) + "s of the wall time was spent waiting")
   for w in r.warnings { list.push(lines, "WARNING: " + w) }
   if r.harness_broken != "" then list.push(lines, "the verify command stopped working mid-run: " + r.harness_broken + "\nthe edits on disk were never actually checked.")
   else if r.unverified then list.push(lines, "nothing checked these edits: give --verify, or add a marker file golemide can infer a test command from.")
   else if not r.ok then list.push(lines, "reason: " + failure_reason(r))
 
-  string.join(lines, "\n")
+  list.join(lines, "\n")
 }
 
-fn strs(xs: List[String]) -> Value = value.array(list.map(xs, (s) => value.str(s)))
+fn strs(xs: List[String]) -> Value = value.array(list.map(xs, (s) => value.string(s)))
 
 fn verify_value(v: observe.CommandResult, with_output: Bool) -> Value = {
   var fields = [("exit", value.int(v.code)), ("timed_out", value.bool(v.timed_out)), ("ms", value.int(v.duration_ms))]
-  if with_output then list.push(fields, ("output_tail", value.str(observe.tail(string.trim(v.stdout + "\n" + v.stderr), OUTPUT_TAIL_LINES))))
+  if with_output then list.push(fields, ("output_tail", value.string(observe.tail(string.trim(v.stdout + "\n" + v.stderr), OUTPUT_TAIL_LINES))))
   value.object(fields)
 }
 
@@ -69,21 +69,21 @@ fn attempt_value(t: results.Attempt) -> Value = {
     ("n", value.int(t.n)),
     ("read", strs(t.read)),
     ("edited", strs(list.map(t.edits, (e) => e.path))),
-    ("rejected", value.array(list.map(t.rejected, (x) => value.object([("path", value.str(x.path)), ("why", value.str(x.why))])))),
+    ("rejected", value.array(list.map(t.rejected, (x) => value.object([("path", value.string(x.path)), ("why", value.string(x.why))])))),
     ("ok", value.bool(t.ok)),
     ("cost_usd", usd_value(t.cost_usd)),
     ("ms", value.int(t.ms)),
   ]
-  if t.model != "" then list.push(fields, ("model", value.str(t.model)))
-  if t.explanation != "" then list.push(fields, ("explanation", value.str(t.explanation)))
-  if t.apply_error != "" then list.push(fields, ("apply_error", value.str(t.apply_error)))
+  if t.model != "" then list.push(fields, ("model", value.string(t.model)))
+  if t.explanation != "" then list.push(fields, ("explanation", value.string(t.explanation)))
+  if t.apply_error != "" then list.push(fields, ("apply_error", value.string(t.apply_error)))
   match t.verify { some(v) => list.push(fields, ("verify", verify_value(v, false))), none => () }
   value.object(fields)
 }
 
 fn outcome_json(r: results.Outcome, verify_command: String) -> String = {
   var fields = [
-    ("status", value.str(status_of(r))),
+    ("status", value.string(status_of(r))),
     ("ok", value.bool(r.ok)),
     ("exit", value.int(exit_code(r))),
     ("attempts", value.int(list.len(r.attempts))),
@@ -92,13 +92,13 @@ fn outcome_json(r: results.Outcome, verify_command: String) -> String = {
     ("wall_ms", value.int(r.wall_ms)),
     ("throttled", value.int(r.throttled)),
     ("throttled_ms", value.int(r.throttled_ms)),
-    ("verify_command", value.str(verify_command)),
+    ("verify_command", value.string(verify_command)),
     ("warnings", strs(r.warnings)),
     ("attempt_log", value.array(list.map(r.attempts, attempt_value))),
   ]
   match r.polish_kept { some(k) => list.push(fields, ("polish_kept", value.bool(k))), none => () }
-  if r.harness_broken != "" then list.push(fields, ("harness_broken", value.str(r.harness_broken)))
-  if r.diff != "" then list.push(fields, ("diff", value.str(r.diff)))
+  if r.harness_broken != "" then list.push(fields, ("harness_broken", value.string(r.harness_broken)))
+  if r.diff != "" then list.push(fields, ("diff", value.string(r.diff)))
   match option.flat_map(list.last(r.attempts), (t) => t.verify) { some(v) => list.push(fields, ("last_verify", verify_value(v, true))), none => () }
   json.stringify(value.object(fields))
 }
@@ -107,9 +107,9 @@ fn outcome_json(r: results.Outcome, verify_command: String) -> String = {
 // it already passes. Same keys as `outcome_json`, so a caller reads one shape.
 fn status_json(status: String, exit: Int, message: String, verify_command: String) -> String =
   json.stringify(value.object([
-    ("status", value.str(status)), ("ok", value.bool(exit == 0)), ("exit", value.int(exit)),
+    ("status", value.string(status)), ("ok", value.bool(exit == 0)), ("exit", value.int(exit)),
     ("attempts", value.int(0)), ("changed", strs([])), ("cost_usd", value.float(0.0)),
-    ("verify_command", value.str(verify_command)), ("message", value.str(message)),
+    ("verify_command", value.string(verify_command)), ("message", value.string(message)),
   ]))
 
 fn outcome_for_test(solved: Bool, unverified: Bool, broken: String) -> results.Outcome =
@@ -135,21 +135,21 @@ test "the JSON report carries each attempt and the tail of the last verify" {
     apply_error: "", verify: some(v), ok: false, cost_usd: 0.0012, ms: 4000, explanation: "return the sum" }
   let r = results.Outcome { ok: false, attempts: [a1], changed: ["a.py"], cost_usd: 0.0012, wall_ms: 5000, warnings: [], harness_broken: "", polish_kept: none, unverified: false, diff: "", throttled: 0, throttled_ms: 0 }
   let doc = json.parse(outcome_json(r, "pytest -q")) ?? value.object([])
-  assert_eq(json.get_string(doc, "status"), some("not_solved"))
-  assert_eq(json.get_int(doc, "exit"), some(1))
-  assert_eq(json.get_string(doc, "verify_command"), some("pytest -q"))
-  assert_eq(json.get_int(doc, "throttled"), some(0))
-  assert_eq(json.get_int(doc, "throttled_ms"), some(0))
+  assert_eq(value.get_string(doc, "status"), some("not_solved"))
+  assert_eq(value.get_int(doc, "exit"), some(1))
+  assert_eq(value.get_string(doc, "verify_command"), some("pytest -q"))
+  assert_eq(value.get_int(doc, "throttled"), some(0))
+  assert_eq(value.get_int(doc, "throttled_ms"), some(0))
   assert(string.contains(outcome_json(results.Outcome { ok: false, attempts: [], changed: [], cost_usd: 0.00015620000249147415, wall_ms: 0, warnings: [], harness_broken: "", polish_kept: none, unverified: false, diff: "", throttled: 0, throttled_ms: 0 }, ""), "\"cost_usd\":0.000156,"))
-  let log = json.get_array(doc, "attempt_log") ?? []
+  let log = value.get_array(doc, "attempt_log") ?? []
   assert_eq(list.len(log), 1)
   let first = list.first(log) ?? value.object([])
-  assert_eq(json.get_string(first, "explanation"), some("return the sum"))
-  assert_eq(list.len(json.get_array(first, "rejected") ?? []), 1)
-  let last = value.field(doc, "last_verify") ?? value.object([])
-  assert(string.contains(json.get_string(last, "output_tail") ?? "", "FAILED test_a"))
+  assert_eq(value.get_string(first, "explanation"), some("return the sum"))
+  assert_eq(list.len(value.get_array(first, "rejected") ?? []), 1)
+  let last = value.get(doc, "last_verify") ?? value.object([])
+  assert(string.contains(value.get_string(last, "output_tail") ?? "", "FAILED test_a"))
 
   let early = json.parse(status_json("already_passes", 0, "nothing to do", "cargo test")) ?? value.object([])
-  assert_eq(json.get_string(early, "status"), some("already_passes"))
-  assert_eq(json.get_int(early, "attempts"), some(0))
+  assert_eq(value.get_string(early, "status"), some("already_passes"))
+  assert_eq(value.get_int(early, "attempts"), some(0))
 }

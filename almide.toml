@@ -4,4 +4,9 @@ version = "0.4.0"
 edition = "2026"
 
 [dependencies]
-almai = { git = "https://github.com/almide-ai/almai", tag = "v0.5.0" }
+almai = { git = "https://github.com/almide-ai/almai", tag = "v0.6.0" }
+
+# Dialect epoch 15 (#4093): a git dependency outside github.com/almide is fetched only
+# from an owner the root manifest trusts.
+[trust]
+owners = ["github.com/almide-ai"]

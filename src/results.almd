@@ -47,11 +47,11 @@ effect fn changed_by_run(root: String, dirty_before: List[String], attempts: Lis
 // edit accounts for, an edited file that lost most of its lines.
 effect fn gaming_warnings(obs: observe.Observation, attempts: List[Attempt], changed: List[String]) -> List[String] = {
   var out: List[String] = []
-  let touched = list.filter(changed, (f) => regex.is_match("(^|/)(tests?|spec|__tests__)/", string.to_lower(f)) or regex.is_match("(_test\\.|\\.test\\.|_spec\\.|\\.spec\\.|^test_)", string.to_lower(list.last(string.split(f, "/")) ?? "")))
-  if not list.is_empty(touched) then list.push(out, "test files were modified: " + string.join(touched, ", ") + " — check the fix is in the code, not the test")
+  let touched = list.filter(changed, (f) => regex.is_match(regex.new("(^|/)(tests?|spec|__tests__)/"), string.to_lower(f)) or regex.is_match(regex.new("(_test\\.|\\.test\\.|_spec\\.|\\.spec\\.|^test_)"), string.to_lower(list.last(string.split(f, "/")) ?? "")))
+  if not list.is_empty(touched) then list.push(out, "test files were modified: " + list.join(touched, ", ") + " — check the fix is in the code, not the test")
   let edited = list.flatten(list.map(attempts, (a) => list.map(a.edits, (e) => e.path)))
   let unexplained = list.filter(changed, (f) => not list.contains(edited, f))
-  if not list.is_empty(unexplained) then list.push(out, "files changed that no edit accounts for: " + string.join(unexplained, ", "))
+  if not list.is_empty(unexplained) then list.push(out, "files changed that no edit accounts for: " + list.join(unexplained, ", "))
   for a in attempts {
     for e in a.edits {
       let r = observe.read_for_model(obs.root, e.path, 24000)!
