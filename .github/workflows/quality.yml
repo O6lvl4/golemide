@@ -23,11 +23,11 @@ jobs:
       - name: Install the Almide v0.69.0 release
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/almide.tar.gz https://github.com/almide/almide/releases/download/v0.69.0/almide-linux-x86_64.tar.gz
+          curl -fsSL -o /tmp/almide-linux-x86_64.tar.gz https://github.com/almide/almide/releases/download/v0.69.0/almide-linux-x86_64.tar.gz
           curl -fsSL -o /tmp/almide.sha256 https://github.com/almide/almide/releases/download/v0.69.0/almide-checksums.sha256
           (cd /tmp && grep ' almide-linux-x86_64.tar.gz$' almide.sha256 | sha256sum -c -)
           mkdir -p .ci/almide/target/release
-          tar xzf /tmp/almide.tar.gz -C /tmp
+          tar xzf /tmp/almide-linux-x86_64.tar.gz -C /tmp
           install /tmp/almide-linux-x86_64/almide .ci/almide/target/release/almide
           .ci/almide/target/release/almide --version
       - run: rustup toolchain install 1.97.0 --profile minimal
