@@ -20,20 +20,17 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: almide/almide
-          ref: 39f128a2d6af0cfc327d27913453e7af99c143fc # v0.65.1-rc3
-          path: .ci/almide
-          persist-credentials: false
+      - name: Install the Almide v0.69.0 release
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/almide.tar.gz https://github.com/almide/almide/releases/download/v0.69.0/almide-linux-x86_64.tar.gz
+          curl -fsSL -o /tmp/almide.sha256 https://github.com/almide/almide/releases/download/v0.69.0/almide-checksums.sha256
+          (cd /tmp && grep ' almide-linux-x86_64.tar.gz$' almide.sha256 | sha256sum -c -)
+          mkdir -p .ci/almide/target/release
+          tar xzf /tmp/almide.tar.gz -C /tmp
+          install /tmp/almide-linux-x86_64/almide .ci/almide/target/release/almide
+          .ci/almide/target/release/almide --version
       - run: rustup toolchain install 1.97.0 --profile minimal
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        id: compiler
-        with:
-          path: .ci/almide/target/release/almide
-          key: almide-${{ runner.os }}-39f128a2d6af0cfc327d27913453e7af99c143fc-rust1.97.0
-      - if: steps.compiler.outputs.cache-hit != 'true'
-        run: cargo build --release --locked --bin almide --manifest-path .ci/almide/Cargo.toml
       - name: Tests, build and CLI smoke
         env:
           ALMIDE_BIN: ${{ github.workspace }}/.ci/almide/target/release/almide
