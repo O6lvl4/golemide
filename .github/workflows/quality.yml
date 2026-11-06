@@ -15,7 +15,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
-      RUSTUP_TOOLCHAIN: 1.94.0
+      RUSTUP_TOOLCHAIN: 1.97.0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -23,15 +23,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: almide/almide
-          ref: 9d80eb004b82235fda52ecf0f4e5f5a43705a4ed # v0.65.1-rc3
+          ref: 39f128a2d6af0cfc327d27913453e7af99c143fc # v0.65.1-rc3
           path: .ci/almide
           persist-credentials: false
-      - run: rustup toolchain install 1.94.0 --profile minimal
+      - run: rustup toolchain install 1.97.0 --profile minimal
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         id: compiler
         with:
           path: .ci/almide/target/release/almide
-          key: almide-${{ runner.os }}-9d80eb004b82235fda52ecf0f4e5f5a43705a4ed-rust1.94.0
+          key: almide-${{ runner.os }}-39f128a2d6af0cfc327d27913453e7af99c143fc-rust1.97.0
       - if: steps.compiler.outputs.cache-hit != 'true'
         run: cargo build --release --locked --bin almide --manifest-path .ci/almide/Cargo.toml
       - name: Tests, build and CLI smoke
@@ -41,13 +41,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: O6lvl4/gramide-cli
-          ref: 5f6767970bd9314aba8b24c0b8685e3bb81d1401
+          ref: 3dc76232a1ff4dd36950dfa707192cda0ce6105c
           path: .ci/gramide
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: O6lvl4/hew
-          ref: d96ea3d18f0a6e42973da27c7ffca97644f8d9ab
+          ref: bb19e492129b69fd032345b8d136588b2b9e1a90
           path: .ci/hew
           persist-credentials: false
       - name: Build pinned gramide
