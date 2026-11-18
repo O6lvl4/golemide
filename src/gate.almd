@@ -165,6 +165,10 @@ effect fn write_gated(path: String, source: String) -> Result[Written, String] =
   let name = list.last(string.split(path, "/")) ?? path
   let ext = ecosystem.extension_of(path)
   let tmp = dir + "/." + name + ".golemide.tmp" + (if ext == "" then "" else "." + ext)
+  // A new file in a directory that is not there yet: the directory is made. Without
+  // this the write of the temporary file failed and was reported as a refusal by the
+  // syntax gate, about a path the caller never named.
+  if not fs.exists(dir) then fs.mkdir_p(dir) |> result.map_err((e) => "edit.write: could not make the directory " + dir + ": " + e)!
   fs.write_text(tmp, source) |> result.map_err((e) => "edit.write: " + e)!
   let v = run_checker(c, tmp)!
   if v.kind == "invalid" then {
