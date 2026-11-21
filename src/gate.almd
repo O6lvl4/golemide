@@ -18,6 +18,7 @@ import env
 import self.spawn
 import self.observe
 import self.ecosystem
+import self.linked
 
 type Checker = { label: String, program: String, args: List[String] }   // `{}` is the file path; label "" = none
 
@@ -159,6 +160,13 @@ effect fn explain_refusal(path: String, tmp: String, why: String) -> String = {
   }
 }
 
+// What the linked grammars say of a write no program checked: one for which no checker
+// is known, or whose checker could not be run. A write a program did check is not read
+// twice.
+fn own_read(v: Verdict, c: Checker, path: String, source: String) -> linked.Read =
+  if v.kind == "unavailable" or c.label == "" then linked.read(path, source, list.contains(BALANCE_EXTS, ecosystem.extension_of(path)))
+  else linked.Read { by: "", flaw: "" }
+
 effect fn write_gated(path: String, source: String) -> Result[Written, String] = {
   let c = checker_for(path)!
   let dir = match string.last_index_of(path, "/") { some(i) => string.take(path, i), none => "." }
@@ -167,17 +175,22 @@ effect fn write_gated(path: String, source: String) -> Result[Written, String] =
   let tmp = dir + "/." + name + ".golemide.tmp" + (if ext == "" then "" else "." + ext)
   // A new file may be the first in its directory. Without this the write failed there
   // and was reported as "refused by the syntax gate", which it was not.
-  let _ = fs.mkdir_p(dir)
+  // Asked with a trailing slash: a component cannot see the directory it was given by its
+  // bare name (`/work` is not there, `/work/` is), and making it "again" left a stray
+  // directory of that name inside the project.
+  let _ = if fs.is_dir(dir + "/") then ok(()) else fs.mkdir_p(dir)
   fs.write_text(tmp, source) |> result.map_err((e) => "edit.write: " + e)!
   let v = run_checker(c, tmp)!
-  if v.kind == "invalid" then {
-    let why = explain_refusal(path, tmp, v.why)!
+  let own = own_read(v, c, path, source)
+  let refusal = if v.kind == "invalid" then explain_refusal(path, tmp, v.why)! else string.replace(own.flaw, tmp, "<file>")
+  if refusal != "" then {
     let _ = fs.remove(tmp)
-    err("edit.write: " + why)
+    err("edit.write: " + refusal)
   }
   else {
     fs.rename(tmp, path) |> result.map_err((e) => "edit.write: rename: " + e)!
-    ok(Written { path: path, bytes: list.len(bytes.to_list(bytes.from_string(source))), checked: if v.kind == "ok" and c.label != "" then c.label else "" })
+    ok(Written { path: path, bytes: list.len(bytes.to_list(bytes.from_string(source))),
+      checked: if v.kind == "ok" and c.label != "" then c.label else own.by })
   }
 }
 

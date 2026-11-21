@@ -17,7 +17,11 @@ with tempfile.TemporaryDirectory() as tmp:
  probe=root/'gate-probe';(probe/'src').mkdir(parents=True)
  for module in (Path(__file__).resolve().parents[1]/'src').glob('*.almd'):
   if module.name != 'main.almd':shutil.copyfile(module,probe/'src'/module.name)
- (probe/'almide.toml').write_text('[package]\nname = "gate_probe"\nversion = "0.1.0"\nedition = "2026"\n')
+ # The gate links gramide's grammars (src/linked.almd), so the probe carries this
+ # repository's dependencies, pinned by the same lock.
+ repo=Path(__file__).resolve().parents[1]
+ (probe/'almide.toml').write_text((repo/'almide.toml').read_text().replace('name = "golemide"','name = "gate_probe"',1))
+ shutil.copyfile(repo/'almide.lock',probe/'almide.lock')
  (probe/'src/main.almd').write_text('import self.gate\neffect fn main() -> Unit = {\n  let c = gate.checker_for("example.go")!\n  assert_eq(c.label, "gramide")\n}\n')
  subprocess.run([os.environ.get('ALMIDE_BIN','almide'),'run'],cwd=probe,env=env,check=True)
  assert 'languages\n' in grammar_trace.read_text()
