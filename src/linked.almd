@@ -1,0 +1,53 @@
+// The write gate's own grammars: gramide's engine and language packages, linked in.
+//
+// The gate's first choice is a checker program (gate.almd): `gramide check`, or a
+// language's own tool. Where none can be run — the checker is not installed, or golemide
+// is a WebAssembly component in a sandbox and can start nothing — a write used to go to
+// disk unchecked, and said so. With the grammars linked, such a write is read here:
+//
+//   - a language with a linked grammar that can check (Almide, Go, Rust, Python,
+//     JavaScript, TypeScript) is parsed, and a file that does not parse is refused;
+//   - anything else with brackets is asked the two questions that cannot be wrong: do
+//     `()`, `[]`, `{}` balance, and does every literal and comment close.
+//
+// These are the packages hew links, at the same versions.
+
+import gramide.lang as lang
+import gramide.balance as balance
+import gramide.package_api
+import gramide_almide
+import gramide_go
+import gramide_rust
+import gramide_python
+import gramide_javascript
+import gramide_typescript
+
+fn packages() -> List[package_api.Definition] =
+  [gramide_almide.definition(), gramide_go.definition(), gramide_rust.definition(), gramide_python.definition(),
+   gramide_javascript.definition(), gramide_typescript.definition(), gramide_typescript.tsx()]
+
+// What a check here found: `by` is what read the file ("" when nothing here can), and
+// `flaw` is why it does not pass ("" when it does).
+type Read = { by: String, flaw: String }
+
+// `balanced`: whether the bracket check may be used for this file when no grammar reads
+// it. It is right for the C family and wrong for, say, Markdown or a shell script.
+fn read(path: String, source: String, balanced: Bool) -> Read =
+  if lang.supports(packages(), path, "check") then match lang.verify_source(packages(), path, source) {
+    ok(_) => Read { by: "gramide (linked)", flaw: "" },
+    err(e) => Read { by: "gramide (linked)", flaw: e },
+  }
+  else if balanced then match balance.check(source) {
+    none => Read { by: "balance (linked)", flaw: "" },
+    some(f) => Read { by: "balance (linked)", flaw: path + ":" + int.to_string(f.line) + ":" + int.to_string(f.col) + ": " + f.message },
+  }
+  else Read { by: "", flaw: "" }
+
+test "a file a linked grammar reads is parsed; one it does not read may have its brackets counted" {
+  assert_eq(read("a.py", "x = [1, 2]\n", false), Read { by: "gramide (linked)", flaw: "" })
+  assert_eq(read("a.py", "def f(a, b:\n    return (a + b\n", false).by, "gramide (linked)")
+  assert(read("a.py", "def f(a, b:\n    return (a + b\n", false).flaw != "")
+  assert_eq(read("a.java", "class A { void f() { } }\n", true), Read { by: "balance (linked)", flaw: "" })
+  assert(read("a.java", "class A { void f() { }\n", true).flaw != "")
+  assert_eq(read("notes.md", "an (open bracket\n", false), Read { by: "", flaw: "" })
+}

@@ -5,8 +5,17 @@ edition = "2026"
 
 [dependencies]
 almai = { git = "https://github.com/almide-ai/almai", tag = "v0.6.0" }
+# The grammars the write gate reads with when no checker program can be run (linked.almd):
+# the same engine and language packages hew links.
+gramide = { git = "https://github.com/O6lvl4/gramide", tag = "v0.2.12" }
+gramide_almide = { git = "https://github.com/O6lvl4/gramide-almide", tag = "v0.1.15" }
+gramide_go = { git = "https://github.com/O6lvl4/gramide-go", tag = "v0.1.15" }
+gramide_rust = { git = "https://github.com/O6lvl4/gramide-rust", tag = "v0.1.17" }
+gramide_python = { git = "https://github.com/O6lvl4/gramide-python", tag = "v0.1.14" }
+gramide_javascript = { git = "https://github.com/O6lvl4/gramide-javascript", tag = "v0.3.14" }
+gramide_typescript = { git = "https://github.com/O6lvl4/gramide-typescript", tag = "v0.3.14" }
 
 # Dialect epoch 15 (#4093): a git dependency outside github.com/almide is fetched only
 # from an owner the root manifest trusts.
 [trust]
-owners = ["github.com/almide-ai"]
+owners = ["github.com/almide-ai", "github.com/o6lvl4"]
