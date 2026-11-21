@@ -46,12 +46,14 @@ call.
 
 ### Models
 
-golemide runs on `cf:glm-5.3-flash` and escalates to `cf:glm-5.3` after repeated
-failures. `--model` and `--strong-model` choose others, as `PROVIDER:MODEL`:
+golemide runs on `cf:glm-5.3`. `--model` chooses another, as `PROVIDER:MODEL`, and
+`--strong-model` a second one to escalate to after repeated failures (by default the
+same one: the cheaper default, `cf:glm-5.3-flash`, was withdrawn by its provider on
+2026-11-20, and the numbers below that name it were measured before that):
 
 | Model | Runs on | Needs |
 |---|---|---|
-| `cf:glm-5.3-flash` (default), `cf:glm-5.3`, … | Cloudflare Workers AI | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` |
+| `cf:glm-5.3` (default), `cf:gemma-4-26b`, … | Cloudflare Workers AI | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` |
 | `openai:…`, `openrouter:…`, `deepseek:…`, `zai:…`, `groq:…` | that OpenAI-compatible service | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, … |
 | `anthropic:…`, `gemini:…` | Anthropic's Messages API, Gemini | `ANTHROPIC_API_KEY`; `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
 | `ollama:…`, `lmstudio:…` | a local server | nothing |

@@ -114,9 +114,17 @@ effect fn invoke(creds: Credentials, req: Request) -> Result[Response, String] =
       effort: effort_for(req.model, req.reasoning_effort), schema: req.schema },
     live.Limits { total_s: TOTAL_TIMEOUT_S, idle_s: IDLE_TIMEOUT_S }, hedge_after_ms()!, call_max_ms()!) {
     ok(ran) => settle(ran.reply, ran.hedged, ran.won_by_hedge),
-    err(e) => err(core.error_text(e)),
+    err(e) => err(gone(req.model, core.error_text(e))),
   }
 }
+
+// A model its provider no longer serves answers 410 (or 404) to every request, and the
+// provider's own words for it do not say what to do. No retry helps: the remedy is
+// another model, so the error says so and keeps the status ask.almd classifies on.
+fn gone(model: String, said: String) -> String =
+  if string.starts_with(said, "status 410") or string.starts_with(said, "status 404")
+    then said + " (" + model + " is not served by its provider, or no longer: choose another with --model)"
+    else said
 
 fn reply(content: String, reasoning: String, finish: String) -> live.Reply =
   live.Reply { content: content, reasoning: reasoning, calls: [], finish: core.finish_of(finish), raw_finish: finish,
@@ -146,6 +154,12 @@ test "a length finish with no content names the remedy its cause actually calls 
     ok(r) => { assert_eq(r.text, "{\"ok\":true}"); assert(r.hedged) },
     err(e) => assert_eq(e, ""),
   }
+}
+
+test "a model that is gone is named, with what to do about it" {
+  assert(string.contains(gone("cf:x", "status 410: Gone"), "cf:x is not served"))
+  assert(string.starts_with(gone("cf:x", "status 410: Gone"), "status 410: Gone"))
+  assert_eq(gone("cf:x", "status 429: slow down"), "status 429: slow down")
 }
 
 test "reasoning effort goes to Cloudflare only" {

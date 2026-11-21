@@ -9,8 +9,12 @@ import json
 import regex
 import self.llm
 
-let MODEL_TRIAGE = "cf:glm-5.3-flash"
-let MODEL_WORK = "cf:glm-5.3-flash"
+// The default was cf:glm-5.3-flash until its provider withdrew it (2026-11-20: every
+// request answered 410). Until a cheaper model has been measured in its place the work
+// runs on the model it used to escalate to, so by default the ladder's last rung changes
+// the budget and the effort and not the model.
+let MODEL_TRIAGE = "cf:glm-5.3"
+let MODEL_WORK = "cf:glm-5.3"
 let MODEL_STRONG = "cf:glm-5.3"
 
 type Options = { system: String, model: String, max_output_tokens: Int, reasoning_effort: String }
