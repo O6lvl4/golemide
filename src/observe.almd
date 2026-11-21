@@ -3,7 +3,7 @@
 
 import fs
 import env
-import process
+import self.spawn
 import regex
 import json
 import self.ecosystem
@@ -29,7 +29,7 @@ effect fn run(command: String, cwd: String, timeout_ms: Int) -> CommandResult = 
   // a subshell, not a brace group: `{ cmd & ; }` is a bash syntax error and a
   // verify command is allowed to end in `&`
   let script = "cd " + shell_quote(cwd) + " && ( " + command + " )" + redirect
-  let status = process.output(process.ProcessCommand { cmd: "bash", args: ["-c", script], timeout_ms: timeout_ms })
+  let status = spawn.output("bash", ["-c", script], timeout_ms)
   // whatever was written before the deadline is still what the model needs
   let captured_out = captured(out_path)!
   let captured_err = captured(err_path)!
@@ -207,7 +207,7 @@ effect fn builtin_read(root: String, rel: String, limit: Int) -> Read = match fs
 }
 
 effect fn hew_read(full: String, rel: String, limit: Int) -> Result[Read, String] = {
-  let st = process.output(process.ProcessCommand { cmd: "hew", args: ["read-json", full, "--max-chars", int.to_string(limit)], timeout_ms: 20000 })!
+  let st = spawn.output("hew", ["read-json", full, "--max-chars", int.to_string(limit)], 20000)!
   guard st.code == 0 else err("hew read failed")
   decode_hew_read(st.stdout, full, rel, limit)
 }

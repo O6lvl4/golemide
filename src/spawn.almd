@@ -1,0 +1,17 @@
+// Starting a program: the one file golemide does it in.
+//
+// golemide starts programs for four things: a verify command, a syntax checker, asking
+// gramide which languages it knows, and hew for a notebook. They all come through here so
+// that the build for a sandbox can leave the ability out: ci/build-wasm.sh builds the edit
+// tool as a WebAssembly component with wasm/spawn.almd in this file's place, and that
+// component asks its host for no way to start anything.
+
+import process
+
+type Ran = { code: Int, stdout: String, stderr: String }
+
+effect fn output(cmd: String, args: List[String], timeout_ms: Int) -> Result[Ran, String] =
+  match process.output(process.ProcessCommand { cmd: cmd, args: args, timeout_ms: timeout_ms }) {
+    ok(st) => ok(Ran { code: st.code, stdout: st.stdout, stderr: st.stderr }),
+    err(e) => err(e),
+  }
