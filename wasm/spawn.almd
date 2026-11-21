@@ -1,0 +1,9 @@
+// Starting a program, for the WebAssembly component (ci/build-wasm.sh puts this file in
+// place of src/spawn.almd): it cannot be done. Every caller already has an answer for a
+// program that could not be started: a checker that is not installed is "unavailable",
+// and the write is then checked by what golemide can check itself.
+
+type Ran = { code: Int, stdout: String, stderr: String }
+
+effect fn output(cmd: String, args: List[String], timeout_ms: Int) -> Result[Ran, String] =
+  err("no program can be started here: " + cmd)

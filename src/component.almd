@@ -1,0 +1,49 @@
+// `golemide edit` as a sandbox's tool: a WebAssembly component (ci/build-wasm.sh).
+//
+//   {"path": P, "replacements": [{"old": O, "new": N}]}   or   {"path": P, "source": S}
+//
+// on stdin, the same request `golemide edit` takes; the same JSON answer on stdout. It is
+// the same code: the loose matching of a quoted passage, the refusal to blank a file, the
+// check before a write. What it cannot do is start a checker program (wasm/spawn.almd), so
+// a write is checked by what golemide checks itself, and the answer says by what.
+//
+// A host that runs tools for an agent gives a tool its arguments on stdin and its
+// settings in the environment:
+//
+//   GOLEMIDE_ROOT        where the sandbox shows the project (default: .)
+//   GOLEMIDE_HOST_ROOT   where the model knows the project to be: a path under it is read
+//                        as the same path under GOLEMIDE_ROOT
+//   GOLEMIDE_CREATE=1    a file that does not exist may be created
+
+import env
+import io
+import json
+import self.tool
+
+// The request with its path placed where this sandbox shows the project.
+fn placed(request: String, host_root: String) -> String = match json.parse(request) {
+  err(_) => request,
+  ok(doc) => {
+    let path = value.get_string(doc, "path") ?? ""
+    let inside = if host_root != "" and string.starts_with(path, host_root + "/") then string.drop(path, string.len(host_root) + 1) else path
+    match value.as_object(doc) {
+      err(_) => request,
+      ok(rows) => json.stringify(value.object(list.map(rows, (r) => if r.0 == "path" then ("path", value.string(inside)) else r))),
+    }
+  },
+}
+
+effect fn main() -> Unit = {
+  let root = tool.absolute_root(env.get("GOLEMIDE_ROOT") ?? ".", env.cwd() ?? ".")
+  let request = placed(io.read_all(), string.trim(env.get("GOLEMIDE_HOST_ROOT") ?? ""))
+  match tool.apply_request(root, request, (env.get("GOLEMIDE_CREATE") ?? "") == "1") {
+    ok(r) => println(tool.result_json(r)),
+    err(e) => println(json.stringify(value.object([("code", value.int(2)), ("error", value.string(e))]))),
+  }
+}
+
+test "a path the model knows is the same path under the sandbox's root" {
+  assert_eq(placed("{\"path\":\"/home/u/proj/src/a.py\",\"source\":\"x\"}", "/home/u/proj"), "{\"path\":\"src/a.py\",\"source\":\"x\"}")
+  assert_eq(placed("{\"path\":\"src/a.py\",\"source\":\"x\"}", "/home/u/proj"), "{\"path\":\"src/a.py\",\"source\":\"x\"}")
+  assert_eq(placed("not json", "/home/u/proj"), "not json")
+}
