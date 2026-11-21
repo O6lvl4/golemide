@@ -43,12 +43,14 @@ almide build
 
 ### モデル
 
-golemide は `cf:glm-5.3-flash` で動き、失敗が続くと `cf:glm-5.3` に切り替えます。
-`--model` と `--strong-model` で、`プロバイダ:モデル` の形で別のモデルを選べます。
+golemide は `cf:glm-5.3` で動きます。`--model` で、`プロバイダ:モデル` の形で別のモデルを選べます。
+`--strong-model` は、失敗が続いたときに切り替える先です（既定は同じモデル）。
+以前の既定だった安い `cf:glm-5.3-flash` は 2026-11-20 に提供元が廃止しました。
+下の記録のうちこの名前が出てくるものは、廃止前に測ったものです。
 
 | モデル | 動く先 | 必要なもの |
 |---|---|---|
-| `cf:glm-5.3-flash`（既定）、`cf:glm-5.3`、… | Cloudflare Workers AI | `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN` |
+| `cf:glm-5.3`（既定）、`cf:gemma-4-26b`、… | Cloudflare Workers AI | `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN` |
 | `openai:…`、`openrouter:…`、`deepseek:…`、`zai:…`、`groq:…` | その OpenAI 互換サービス | `OPENAI_API_KEY`、`OPENROUTER_API_KEY` など |
 | `anthropic:…`、`gemini:…` | Anthropic の Messages API、Gemini | `ANTHROPIC_API_KEY`、`GEMINI_API_KEY` または `GOOGLE_API_KEY` |
 | `ollama:…`、`lmstudio:…` | 手元のサーバー | なし |

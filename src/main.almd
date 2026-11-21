@@ -20,7 +20,7 @@ import self.tool
 
 // Kept equal to almide.toml's version. comide reads it to tell whether this
 // golemide has the tool interface (edit, --json) it calls.
-let VERSION = "0.4.0"
+let VERSION = "0.4.1"
 
 let USAGE = """
 golemide — observe, then act
@@ -40,12 +40,12 @@ Options
   --verify CMD    the command whose exit status defines success; given one, nothing is guessed
   --attempts N    edit/verify rounds before giving up (default 6)
   --files N       files read per attempt (default 6)
-  --model M       model id, PROVIDER:MODEL (default cf:glm-5.3-flash): cf:... Cloudflare;
+  --model M       model id, PROVIDER:MODEL (default cf:glm-5.3): cf:... Cloudflare;
                   openai:, openrouter:, deepseek:, zai:, groq:, ollama:, lmstudio:, or any
                   NAME: with NAME_BASE_URL and NAME_API_KEY, OpenAI-compatible; claude or
                   claude:MODEL, Claude Code's claude -p
-  --strong-model M  where repeated unusable or identical failures escalate to (default cf:glm-5.3);
-                  set it to --model to keep a run on one model
+  --strong-model M  where repeated unusable or identical failures escalate to (default cf:glm-5.3,
+                  the same as --model's default)
   --create       allow creating files that do not exist
   --polish N      extra attempts that only simplify a passing result (default 0; measured at a 2-byte diff on one task)
   --quiet         only the final report
