@@ -34,8 +34,13 @@ let IN_PROJECT: List[String] = ["CHEATSHEET.md", "docs/CHEATSHEET.md", "CHEATSHE
 // a reference for it, best first. A command a toolchain does not have exits
 // non-zero and the next one is tried, so a toolchain that grows a better
 // reference is picked up without a change here.
+//
+// Almide 0.70 took `almide ide` away (almide#4590) and prints the stdlib's functions
+// with `almide query stdlib` (~30 KB). With only the first two here, a golemide on
+// 0.70 sent no reference at all, and said so nowhere; the older two stay for the
+// toolchains that still have them.
 let TOOLCHAIN: List[(String, String, List[String])] = [
-  ("almide", "almide", ["almide ide cheatsheet", "almide ide stdlib-snapshot"]),
+  ("almide", "almide", ["almide ide cheatsheet", "almide ide stdlib-snapshot", "almide query stdlib"]),
 ]
 
 // `c++` is a language; `CAIRN_REFERENCE_C__` is the variable that overrides it.
