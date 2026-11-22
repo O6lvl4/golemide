@@ -18,8 +18,8 @@
 #                 out for itself how to check its work, as it would from a person's request
 #   RUNS / LANGS / JOBS / OUT / POLYGLOT   as in leaderboard.sh
 #
-# comide runs on its own defaults (cf:glm-5.3 for the conversation, golemide's
-# cf:glm-5.3-flash behind `solve`) with --yes, and needs the Cloudflare credentials.
+# comide runs on its own defaults (cf:glm-5.3 for the conversation, and
+# behind `solve`) with --yes, and needs the Cloudflare credentials.
 # Cursor needs CURSOR_API_KEY; it runs --force, so, as with ZCode, run it in the
 # container (bench/container.sh), not on your machine.
 #

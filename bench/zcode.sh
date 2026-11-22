@@ -8,12 +8,12 @@
 # The harness is bench/exercism.sh with BENCH_AGENT pointing at the adapter below:
 # same stripped exercise, same verify command, same independent re-check.
 #
-#   bench/zcode.sh                       cf:glm-5.3-flash, all six languages, one run
+#   bench/zcode.sh                       cf:glm-5.3, all six languages, one run
 #   MODEL=cf:glm-5.3 RUNS=3 bench/zcode.sh
 #
 #   ZCODE        the ZCode checkout, built (`pnpm --filter '@zcode/cli...' build`)
 #                (default: $TMPDIR/golemide-zcode/ZCode, cloned and built if absent)
-#   MODEL        golemide's model name; mapped to Cloudflare's id   (default: cf:glm-5.3-flash)
+#   MODEL        golemide's model name; mapped to Cloudflare's id   (default: cf:glm-5.3)
 #   REASONING    ZCode's reasoningLevel for the model: low, high, max (default: low)
 #   WALL         seconds one exercise may take before ZCode is stopped (default: 900)
 #   RUNS / LANGS / JOBS / OUT / POLYGLOT   as in leaderboard.sh
@@ -41,7 +41,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODEL="${MODEL:-cf:glm-5.3-flash}"
+MODEL="${MODEL:-cf:glm-5.3}"
 REASONING="${REASONING:-low}"
 WALL="${WALL:-900}"
 RUNS="${RUNS:-1}"

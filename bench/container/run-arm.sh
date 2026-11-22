@@ -30,7 +30,7 @@ snapshot > "/tmp/$name.before"
 
 case "$arm" in
   golemide@*)
-    OUT="/out/$name" MODELS="${MODEL:-cf:glm-5.3-flash}" ATTEMPTS="${arm#golemide@}" \
+    OUT="/out/$name" MODELS="${MODEL:-cf:glm-5.3}" ATTEMPTS="${arm#golemide@}" \
       bash /opt/golemide/bench/leaderboard.sh ;;
   zcode)
     OUT=/out/zcode ZCODE=/opt/ZCode ZCODE_NODE=/opt/node24/bin/node ZCODE_HOME_DIR=/tmp/zcode-home \

@@ -20,7 +20,7 @@
 #               comide      comide headless on its own defaults, 900 s per exercise
 #               cursor      the Cursor CLI headless, CURSOR_MODEL or Cursor's default, 900 s per exercise
 #   CURSOR_MODEL  for the cursor arm; empty = Cursor's default (auto)
-#   MODEL     one model for every arm              (default: cf:glm-5.3-flash)
+#   MODEL     one model for every arm              (default: cf:glm-5.3)
 #   RUNS      runs per arm                         (default: 1)
 #   JOBS      exercises in parallel                (default: 4)
 #   LANGS     space-separated                      (default: all six)
@@ -38,7 +38,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARMS="${ARMS:-golemide@2 zcode golemide@8 aider}"
-MODEL="${MODEL:-cf:glm-5.3-flash}"
+MODEL="${MODEL:-cf:glm-5.3}"
 RUNS="${RUNS:-1}"
 JOBS="${JOBS:-4}"
 LANGS="${LANGS:-cpp go java javascript python rust}"
@@ -176,6 +176,6 @@ print("| cost | " + " | ".join(f"${statistics.mean(sum(v[1] for v in rows.values
 changed = [a for a in data if a != "aider" and os.path.getsize(f"{out}/{a.replace('@', '-')}.env-changes") > 0] if data else []
 print("\nEnvironment changed during the run by: " + (", ".join(changed) if changed else "none of the containerised arms") + ".")
 print("Aider runs in its own copy of the same base image. Self-reported; runs per arm as shown.")
-print("comide runs on cf:glm-5.3 with golemide's solve on cf:glm-5.3-flash; the cursor arm on Cursor's model (its cost is on Cursor's dashboard, not here).")
+print("comide runs on cf:glm-5.3 with golemide's solve on cf:glm-5.3; the cursor arm on Cursor's model (its cost is on Cursor's dashboard, not here).")
 PY
 echo "written: $OUT/summary.md"

@@ -6,10 +6,10 @@
 # golemide under that protocol — every language, two attempts — for one or more
 # models, one or more times, and writes a table that can be set next to the board.
 #
-#   bench/leaderboard.sh                          one run, cf:glm-5.3-flash
-#   MODELS="cf:glm-5.3-flash cf:glm-5.3" RUNS=3 bench/leaderboard.sh
+#   bench/leaderboard.sh                          one run, cf:glm-5.3
+#   MODELS="cf:glm-5.3 cf:gemma-4-26b" RUNS=3 bench/leaderboard.sh
 #
-#   MODELS      models to run, space-separated       (default: cf:glm-5.3-flash)
+#   MODELS      models to run, space-separated       (default: cf:glm-5.3)
 #   RUNS        runs per model; the spread matters   (default: 1)
 #   LANGS       languages                            (default: all six)
 #   JOBS        exercises in parallel                (default: 4)
@@ -31,7 +31,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODELS="${MODELS:-cf:glm-5.3-flash}"
+MODELS="${MODELS:-cf:glm-5.3}"
 RUNS="${RUNS:-1}"
 LANGS="${LANGS:-cpp go java javascript python rust}"
 JOBS="${JOBS:-4}"

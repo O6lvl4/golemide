@@ -17,7 +17,7 @@
 #   BENCH_CHECK_ONLY=1                   prove the harness, run nothing
 #   BENCH_ONLY=pairs.tsv                 re-run only these "lang<TAB>exercise" rows
 #   BENCH_MODEL=cf:glm-5.3               model, passed as --model (default: the agent's)
-#   BENCH_STRONG_MODEL=cf:glm-5.3-flash  where the ladder escalates, passed as --strong-model
+#   BENCH_STRONG_MODEL=cf:glm-5.3        where the ladder escalates, passed as --strong-model
 #   BENCH_TIMEOUT=300                    verify deadline in seconds for the agent's runs
 #   BENCH_ATTEMPTS=2                     attempts per exercise (default 3)
 #   BENCH_WORK=/dir                      where logs and results.tsv go
