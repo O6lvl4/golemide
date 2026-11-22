@@ -41,6 +41,15 @@ effect fn apply_request(root: String, input: String, allow_create: Bool) -> Edit
     },
   }
 
+// What the file is to hold: the source given whole, or the file with the replacements
+// made. With it, what each replacement matched, and why they could not be made if not.
+fn wanted(before: String, e0: editing.Edit, reps: List[replace.Replacement]) -> (String, List[String], String) =
+  if list.is_empty(reps) then (editing.unwrap_source(e0.source), [], "")
+  else match replace.apply(before, reps) {
+    ok(a) => (a.0, a.1, ""),
+    err(why) => ("", [], why),
+  }
+
 effect fn apply_edit(root: String, e0: editing.Edit, reps: List[replace.Replacement], allow_create: Bool) -> EditResult = {
   let p = paths.resolve_edit_path(e0.path, root, [])
   let full = root + "/" + p
@@ -48,11 +57,7 @@ effect fn apply_edit(root: String, e0: editing.Edit, reps: List[replace.Replacem
   else if not fs.exists(full) and not allow_create then refused(1, p, "does not exist (pass --create to make a new file)")
   else {
     let before = fs.read_text(full) ?? ""
-    let (source, matched, rep_error) = if list.is_empty(reps) then (editing.unwrap_source(e0.source), [], "")
-      else match replace.apply(before, reps) {
-        ok(a) => (a.0, a.1, ""),
-        err(why) => ("", [], why),
-      }
+    let (source, matched, rep_error) = wanted(before, e0, reps)
     // Every replacement found already made: nothing to write, and nothing wrong. Refused
     // as "identical to the current file", the caller would go looking for a fault.
     let all_made = rep_error == "" and not list.is_empty(reps) and source == before

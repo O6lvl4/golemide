@@ -7,10 +7,10 @@
 # with the model pointed at the same Cloudflare endpoint golemide uses, so the only
 # thing that differs between the two numbers is the agent.
 #
-#   bench/aider.sh                         cf:glm-5.3-flash, diff format, 4 threads
+#   bench/aider.sh                         cf:glm-5.3, diff format, 4 threads
 #   MODEL=cf:glm-5.3 bench/aider.sh
 #
-#   MODEL        golemide's model name; mapped to Cloudflare's id   (default: cf:glm-5.3-flash)
+#   MODEL        golemide's model name; mapped to Cloudflare's id   (default: cf:glm-5.3)
 #   EDIT_FORMAT  aider edit format; the board uses diff             (default: diff)
 #   THREADS      exercises in parallel                              (default: 4)
 #   TRIES        the board's protocol is 2                          (default: 2)
@@ -31,7 +31,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODEL="${MODEL:-cf:glm-5.3-flash}"
+MODEL="${MODEL:-cf:glm-5.3}"
 EDIT_FORMAT="${EDIT_FORMAT:-diff}"
 THREADS="${THREADS:-4}"
 TRIES="${TRIES:-2}"

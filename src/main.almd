@@ -234,10 +234,17 @@ effect fn main() -> Unit = {
   let a = parse_args(env.args())
   if a.cmd == "version" or a.cmd == "--version" then { println("golemide " + VERSION); process.exit(0) }
   else if a.cmd == "" or a.cmd == "help" or map.contains(a.flags, "help") then { println(USAGE); process.exit(if a.cmd == "" then 1 else 0) }
-  else if a.cmd == "llm-test" then finish(result.map(llm_test(a), (_) => 0))!
-  else if a.cmd == "observe" then finish(result.map(run_observe(a), (_) => 0))!
-  else if a.cmd == "solve" then finish(run_solve(a))!
-  else if a.cmd == "polish" then finish(run_polish(a))!
-  else if a.cmd == "edit" then finish(run_edit(a))!
-  else { eprintln("unknown command: " + a.cmd + "\n" + USAGE); process.exit(1) }
+  else match carried_out(a)! {
+    some(r) => finish(r)!,
+    none => { eprintln("unknown command: " + a.cmd + "\n" + USAGE); process.exit(1) },
+  }
 }
+
+// The command, carried out; none when there is no such command.
+effect fn carried_out(a: Args) -> Option[Result[Int, String]] =
+  if a.cmd == "llm-test" then some(result.map(llm_test(a), (_) => 0))
+  else if a.cmd == "observe" then some(result.map(run_observe(a), (_) => 0))
+  else if a.cmd == "solve" then some(run_solve(a))
+  else if a.cmd == "polish" then some(run_polish(a))
+  else if a.cmd == "edit" then some(run_edit(a))
+  else none
